@@ -13,7 +13,7 @@ var upgrader = websocket.Upgrader{}
 
 type ClientMessage struct {
 	Socket  *websocket.Conn // connection objexct needs to be sent along with the message
-	Payload contracts.Message
+	Payload contracts.MessageFromUser
 }
 
 var MessageChannel = make(chan ClientMessage, 100)
@@ -27,7 +27,7 @@ func wsHandler(c echo.Context) error {
 		return err
 	}
 	defer ws.Close()
-	var mess contracts.Message
+	var mess contracts.MessageFromUser
 	fmt.Println("WebSocket connection established!")
 
 	for {

@@ -1,9 +1,12 @@
 package symbolmanager
 
 import (
+	"encoding/json"
 	contracts "exchange/Contracts"
 	"exchange/ws"
+	"fmt"
 	"sync"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -123,3 +126,21 @@ func (s *SymbolManager)CreateNewGroup(rec_mess ws.ClientMessage){
 
 	// the pub sub subscription is handled in the above function 
 }
+
+
+func (s *SymbolManager)BrodCastToUsers(symbol_mothod string , data  []byte){
+	s.mutex_lock.RLock()
+	clients := append([]*Client(nil) , s.symbol_method_subs[symbol_mothod]...)
+	s.mutex_lock.RUnlock()
+
+	for _ , client := range clients{
+		go client.WriteMessage(websocket.TextMessage ,data)
+	}
+}
+
+func (s *SymbolManager)BrodCastFromRemote(message contracts.MessageFromPubSubForUser){
+	data , _ := json.Marshal(message)
+	//s.BrodCastToUsers(message.Params[0] , data)
+	fmt.Println(data)
+}
+
