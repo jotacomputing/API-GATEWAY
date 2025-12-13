@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	contracts "exchange/Contracts"
 	"fmt"
-
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
 )
@@ -15,10 +14,18 @@ type ClientMessage struct {
 	Socket  *websocket.Conn // connection objexct needs to be sent along with the message
 	Payload contracts.MessageFromUser
 }
+type Server struct{
+	onDisconnect func(*websocket.Conn)
+}
 
+func NewServer(cleanupfunc func(*websocket.Conn)) *Server{
+	return &Server{
+		onDisconnect: cleanupfunc,
+	}
+}
 var MessageChannel = make(chan ClientMessage, 100)
 
-func wsHandler(c echo.Context) error {
+func (s *Server)wsHandler(c echo.Context) error {
 
 	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 
@@ -27,6 +34,7 @@ func wsHandler(c echo.Context) error {
 		return err
 	}
 	defer ws.Close()
+
 	var mess contracts.MessageFromUser
 	fmt.Println("WebSocket connection established!")
 
@@ -47,11 +55,11 @@ func wsHandler(c echo.Context) error {
 	}
 }
 
-func CreateServer() {
+func(s * Server) CreateServer() {
 	fmt.Println("BOOTING SERVER...")
 
 	e := echo.New()
-	e.GET("/ws", wsHandler)
+	e.GET("/ws", s.wsHandler)
 
 	fmt.Println("LISTENING on :8080 ...")
 
