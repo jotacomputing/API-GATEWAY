@@ -36,7 +36,7 @@ func (s *Server)wsHandler(c echo.Context) error {
 	defer ws.Close()
 
 	var mess contracts.MessageFromUser
-	fmt.Println("WebSocket connection established!")
+	//fmt.Println("WebSocket connection established!")
 
 	for {
 		_, p, err := ws.ReadMessage()

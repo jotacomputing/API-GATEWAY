@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	contracts "exchange/Contracts"
 	"exchange/ws"
+	"fmt"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -51,10 +52,14 @@ func GetSymbolManagerInstance() *SymbolManager {
 
 func (s *SymbolManager) StartSymbolMnagaer() {
 	for message := range ws.MessageChannel {
+		fmt.Println("sybol manager got the message")
+		fmt.Println(message)
 		switch message.Payload.Method {
 		case "SUBSCRIBE":
+			fmt.Println("calling hanlde subscribe")
 			s.handleSubscribe(message)
 		case "UNSUBSCRIBE":
+			fmt.Println("calling hanlde unsubscribe")
 			s.handleUnSubscribe(message)
 		}
 	}
@@ -63,6 +68,7 @@ func (s *SymbolManager) StartSymbolMnagaer() {
 func (s *SymbolManager) handleSubscribe(rec_mess ws.ClientMessage) {
 	// if a subscribe request comes , we aqquire the read lock of the map and check if the mess.payload.symbol exists
 	/// if yeh , we add to the user
+	fmt.Println("inside handle subscibe")
 	defer s.mutex_lock.Unlock()
 	s.mutex_lock.Lock()
 
@@ -70,9 +76,11 @@ func (s *SymbolManager) handleSubscribe(rec_mess ws.ClientMessage) {
 		return
 	}
 	_, ok := s.Symbol_method_subs[rec_mess.Payload.Params[0]]
+	fmt.Println(ok)
 
 	if !ok {
-		s.CreateNewGroup(rec_mess)
+		fmt.Println("initilising stream key in map calling creategrp")
+		go s.CreateNewGroup(rec_mess)
 		// subscription can take time so spawned a go routine
 		go s.Subscriber.SubscribeToSymbolMethod(rec_mess.Payload.Params[0])
 		return
@@ -80,7 +88,7 @@ func (s *SymbolManager) handleSubscribe(rec_mess ws.ClientMessage) {
 	s.mutex_lock.Lock()
 	s.Symbol_method_subs[rec_mess.Payload.Params[0]] = append(s.Symbol_method_subs[rec_mess.Payload.Params[0]], &Client{Conn: rec_mess.Socket})
 	s.mutex_lock.Unlock()
-
+	fmt.Println(s.Symbol_method_subs)
 }
 
 func (s *SymbolManager) handleUnSubscribe(rec_mess ws.ClientMessage) {
@@ -115,13 +123,20 @@ func (s *SymbolManager) handleUnSubscribe(rec_mess ws.ClientMessage) {
 
 func (s *SymbolManager) CreateNewGroup(rec_mess ws.ClientMessage) {
 	// create if the groupt dosent exist for that symbol
+	fmt.Println("inside create grp")
+	fmt.Println("recived message is " , rec_mess)
 	defer s.mutex_lock.Unlock()
+	fmt.Println("after defer statement ")
 	s.mutex_lock.Lock()
+	fmt.Println("after lock statemrnt ")
 	clients := []*Client{}
 	if rec_mess.Socket != nil {
+		fmt.Println(rec_mess.Socket)
 		clients = append(clients, &Client{Conn: rec_mess.Socket})
 	}
 	s.Symbol_method_subs[rec_mess.Payload.Params[0]] = clients
+	fmt.Println("initilising done")
+	fmt.Println(s.Symbol_method_subs)
 
 	// the pub sub subscription is handled in the above function
 }

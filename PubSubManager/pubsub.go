@@ -46,22 +46,26 @@ func getPubSubManagerInstance() *PubSubManager{
 
 
 func (ps *PubSubManager)SubscribeToSymbolMethod(StreamName string){
+	
 	ps.mu.Lock()
 	if _, already := ps.Subscriptions[StreamName]; already {
 		ps.mu.Unlock()
 		return
 	}
 	// if not subscibed
+	fmt.Println("subscribing to the stream")
 	pubsub := ps.rclient.Subscribe(context.Background(), StreamName)
+	
 	ps.Subscriptions[StreamName] = pubsub
 	ps.mu.Unlock()
 
 	
-	ch := pubsub.Channel()
+	ch := pubsub.Channel() 
 	// this is the reciver go routine for every stream 
 	go func() {
 		for msg := range ch {
 			var m contracts.MessageFromPubSubForUser
+			fmt.Println("got some  message from pubsusb",  msg)
 			if err := json.Unmarshal([]byte(msg.Payload), &m); err != nil {
 				fmt.Println("Redis message unmarshal error:", err)
 				continue
