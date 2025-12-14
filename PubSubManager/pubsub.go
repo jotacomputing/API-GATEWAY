@@ -15,13 +15,13 @@ var once sync.Once
 
 type  PubSubManager struct{
 	rclient 		*redis.Client 
-	BroadCaster 	contracts.BroadCaster
+	BroadCaster 	contracts.BroadCasterForPubSub
 	Subscriptions 	map[string]*redis.PubSub // keeps a track of what all streams are we subscribed to 
 	mu 				sync.Mutex
 }
 
 
-func CreateSingletonInstance(broadcaster contracts.BroadCaster) *PubSubManager{
+func CreateSingletonInstance(broadcaster contracts.BroadCasterForPubSub) *PubSubManager{
 	once.Do(func(){
 		client := redis.NewClient(&redis.Options{
 			Addr: "localhost:6379",
@@ -66,6 +66,7 @@ func (ps *PubSubManager)SubscribeToSymbolMethod(StreamName string){
 		for msg := range ch {
 			var m contracts.MessageFromPubSubForUser
 			fmt.Println("got some  message from pubsusb",  msg)
+			
 			if err := json.Unmarshal([]byte(msg.Payload), &m); err != nil {
 				fmt.Println("Redis message unmarshal error:", err)
 				continue

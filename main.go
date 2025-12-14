@@ -17,10 +17,12 @@ func main() {
 	pubsubm := pubsubmanager.CreateSingletonInstance(sm)
 	sm.Subscriber = pubsubm
 	sm.Unsubscriber = pubsubm
-
-	wsServer := ws.NewServer(sm.CleanupConnection)
-	go wsServer.CreateServer()
 	go sm.StartSymbolMnagaer()
+
+
+	wsServer := ws.NewServer(sm , sm , sm) // passed the type 3 times 
+	go wsServer.CreateServer()
+	
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

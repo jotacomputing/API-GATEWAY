@@ -3,7 +3,6 @@ package symbolmanager
 import (
 	"encoding/json"
 	contracts "exchange/Contracts"
-	"exchange/ws"
 	"fmt"
 	"sync"
 
@@ -29,10 +28,9 @@ func (c *Client) WriteMessage(messageType int, data []byte) error {
 
 type SymbolManager struct {
 	Symbol_method_subs map[string][]*Client // keeps a track of the different streams and the subscirbed clients
-	Subscriber         contracts.Subscriber
-	Unsubscriber       contracts.UnSubscriber
-	mutex_lock         sync.RWMutex // this because their can be read write race conditions while updating the map becuase
-	// it is hapoening in differnet go routines
+	Subscriber         contracts.SubscriberToPubSub
+	Unsubscriber       contracts.UnSubscriberToPubSub
+	CommandChan        chan contracts.Command
 }
 
 func CreateSymbolManagerSingleton() *SymbolManager {
@@ -41,6 +39,7 @@ func CreateSymbolManagerSingleton() *SymbolManager {
 			Symbol_method_subs: make(map[string][]*Client),
 			Subscriber:         nil,
 			Unsubscriber:       nil,
+			CommandChan:        make(chan contracts.Command, 1000),
 		}
 	})
 	return SymbolManagerInstance
@@ -50,53 +49,84 @@ func GetSymbolManagerInstance() *SymbolManager {
 	return SymbolManagerInstance
 }
 
-func (s *SymbolManager) StartSymbolMnagaer() {
-	for message := range ws.MessageChannel {
-		fmt.Println("sybol manager got the message")
-		fmt.Println(message)
-		switch message.Payload.Method {
-		case "SUBSCRIBE":
-			fmt.Println("calling hanlde subscribe")
-			s.handleSubscribe(message)
-		case "UNSUBSCRIBE":
-			fmt.Println("calling hanlde unsubscribe")
-			s.handleUnSubscribe(message)
+// methofs for ws handler
+func (sm *SymbolManager) Subscribe(StreamName string, conn *websocket.Conn) {
+	fmt.Println("passing command to channel")
+	sm.CommandChan <- contracts.SubscribeCommand{
+		StreamName: StreamName,
+		Conn:       conn,
+	}
+}
+
+func (sm *SymbolManager) UnSubscribe(StreamName string, conn *websocket.Conn) {
+	sm.CommandChan <- contracts.UnsubscribeCommand{
+		StreamName: StreamName,
+		Conn:       conn,
+	}
+}
+
+func (sm *SymbolManager) CleanupConnection(conn *websocket.Conn) {
+	sm.CommandChan <- contracts.CleanupConnectionCommand{
+		Conn: conn,
+	}
+}
+
+// for the pubsusb manager
+func (sm *SymbolManager) BroadCasteFromRemote(message contracts.MessageFromPubSubForUser) {
+	fmt.Println("received brodcast request sedning to channel ")
+	data, _ := json.Marshal(message)
+	sm.CommandChan <- contracts.BroadcastCommand{
+		StreamName: message.Stream,
+		Data:       data,
+	}
+}
+
+func (sm *SymbolManager) StartSymbolMnagaer() {
+	for command := range sm.CommandChan {
+		fmt.Println("sybol manager got the command")
+		fmt.Println(command)
+		switch c := command.(type) {
+		case contracts.SubscribeCommand:
+			fmt.Println("sybol manager got the subsirbe command")
+			sm.handleSubscribeInternal(c)
+
+		case contracts.UnsubscribeCommand:
+			sm.handleUnsubscribeInternal(c)
+
+		case contracts.CleanupConnectionCommand:
+			sm.handleCleanupInternal(c)
+
+		case contracts.BroadcastCommand:
+			fmt.Println("sybol manager got the brodacast command")
+			sm.handleBroadcastInternal(c)
+
 		}
 	}
 }
 
-func (s *SymbolManager) handleSubscribe(rec_mess ws.ClientMessage) {
-	// if a subscribe request comes , we aqquire the read lock of the map and check if the mess.payload.symbol exists
-	/// if yeh , we add to the user
-	fmt.Println("inside handle subscibe")
-	defer s.mutex_lock.Unlock()
-	s.mutex_lock.Lock()
+// internal subscribe amd unsbbsrcibe methods , that will be called when we recive commands from the channel
 
-	if len(rec_mess.Payload.Params) == 0 {
-		return
-	}
-	_, ok := s.Symbol_method_subs[rec_mess.Payload.Params[0]]
-	fmt.Println(ok)
+func (sm *SymbolManager) handleSubscribeInternal(cmd contracts.SubscribeCommand) {
 
-	if !ok {
+	clients, exists := sm.Symbol_method_subs[cmd.StreamName]
+
+	if !exists {
 		fmt.Println("initilising stream key in map calling creategrp")
-		go s.CreateNewGroup(rec_mess)
+		// First subscriber
+		sm.Symbol_method_subs[cmd.StreamName] = []*Client{{Conn: cmd.Conn}}
 		// subscription can take time so spawned a go routine
-		go s.Subscriber.SubscribeToSymbolMethod(rec_mess.Payload.Params[0])
+		fmt.Println("sbscrbing to pubsubs")
+		go sm.Subscriber.SubscribeToSymbolMethod(cmd.StreamName)
 		return
+	} else {
+		sm.Symbol_method_subs[cmd.StreamName] = append(clients, &Client{Conn: cmd.Conn})
 	}
-	s.mutex_lock.Lock()
-	s.Symbol_method_subs[rec_mess.Payload.Params[0]] = append(s.Symbol_method_subs[rec_mess.Payload.Params[0]], &Client{Conn: rec_mess.Socket})
-	s.mutex_lock.Unlock()
-	fmt.Println(s.Symbol_method_subs)
+
 }
 
-func (s *SymbolManager) handleUnSubscribe(rec_mess ws.ClientMessage) {
-	// unsubscribe messahe
-	// aquire a read lock and check if it was the only user subscrbed to that event
-	s.mutex_lock.Lock()
-	defer s.mutex_lock.Unlock()
-	clients, exists := s.Symbol_method_subs[rec_mess.Payload.Params[0]]
+func (sm *SymbolManager) handleUnsubscribeInternal(cmd contracts.UnsubscribeCommand) {
+
+	clients, exists := sm.Symbol_method_subs[cmd.StreamName]
 	if !exists {
 		return // Already unsubscribed
 	}
@@ -104,79 +134,50 @@ func (s *SymbolManager) handleUnSubscribe(rec_mess ws.ClientMessage) {
 	new_clients := []*Client{}
 
 	for _, client := range clients {
-		if client.Conn != rec_mess.Socket {
+		if client.Conn != cmd.Conn {
 			new_clients = append(new_clients, client)
 		}
 	}
 
 	if len(new_clients) == 0 {
 		// this was the last user , delrte the entry and unsbscribe
-		delete(s.Symbol_method_subs, rec_mess.Payload.Params[0])
-		if s.Unsubscriber != nil {
-			s.Unsubscriber.UnSubscribeToSymbolMethod(rec_mess.Payload.Params[0])
+		delete(sm.Symbol_method_subs, cmd.StreamName)
+		if sm.Unsubscriber != nil {
+			go sm.Unsubscriber.UnSubscribeToSymbolMethod(cmd.StreamName)
 		}
 
 	} else {
-		s.Symbol_method_subs[rec_mess.Payload.Params[0]] = new_clients
+		sm.Symbol_method_subs[cmd.StreamName] = new_clients
 	}
 }
 
-func (s *SymbolManager) CreateNewGroup(rec_mess ws.ClientMessage) {
-	// create if the groupt dosent exist for that symbol
-	fmt.Println("inside create grp")
-	fmt.Println("recived message is " , rec_mess)
-	defer s.mutex_lock.Unlock()
-	fmt.Println("after defer statement ")
-	s.mutex_lock.Lock()
-	fmt.Println("after lock statemrnt ")
-	clients := []*Client{}
-	if rec_mess.Socket != nil {
-		fmt.Println(rec_mess.Socket)
-		clients = append(clients, &Client{Conn: rec_mess.Socket})
-	}
-	s.Symbol_method_subs[rec_mess.Payload.Params[0]] = clients
-	fmt.Println("initilising done")
-	fmt.Println(s.Symbol_method_subs)
-
-	// the pub sub subscription is handled in the above function
-}
-
-func (s *SymbolManager) BrodCastToUsers(symbol_mothod_stream string, data []byte) {
-	s.mutex_lock.RLock()
-	clients := append([]*Client(nil), s.Symbol_method_subs[symbol_mothod_stream]...)
-	s.mutex_lock.RUnlock()
-
-	for _, client := range clients {
-		go client.WriteMessage(websocket.TextMessage, data)
-	}
-}
-
-func (s *SymbolManager) BroadCasteFromRemote(message contracts.MessageFromPubSubForUser) {
-	data, _ := json.Marshal(message)
-	s.BrodCastToUsers(message.Stream, data)
-
-}
-
-
-func (s *SymbolManager) CleanupConnection(conn *websocket.Conn) {
-    s.mutex_lock.Lock()
-    defer s.mutex_lock.Unlock()
-    
-    for key, clients := range s.Symbol_method_subs {
-        newClients := []*Client{}
-        for _, client := range clients {
-            if client.Conn != conn {
-                newClients = append(newClients, client)
-            }
-        }
-        
-        if len(newClients) == 0 {
-            delete(s.Symbol_method_subs, key)
-            if s.Unsubscriber != nil {
-                go s.Unsubscriber.UnSubscribeToSymbolMethod(key)
-            }
-        } else if len(newClients) != len(clients) {
-            s.Symbol_method_subs[key] = newClients
-        }
+func (sm *SymbolManager) handleBroadcastInternal(cmd contracts.BroadcastCommand) {
+	fmt.Println("inside internal brodacst ")
+	fmt.Println(sm.Symbol_method_subs)
+	
+    for _, client := range sm.Symbol_method_subs[cmd.StreamName] {
+		fmt.Println(client)
+        go client.WriteMessage(websocket.TextMessage, cmd.Data)
     }
+}
+
+func (s *SymbolManager) handleCleanupInternal(cmd contracts.CleanupConnectionCommand) {
+
+	for key, clients := range s.Symbol_method_subs {
+		newClients := []*Client{}
+		for _, client := range clients {
+			if client.Conn != cmd.Conn {
+				newClients = append(newClients, client)
+			}
+		}
+
+		if len(newClients) == 0 {
+			delete(s.Symbol_method_subs, key)
+			if s.Unsubscriber != nil {
+				go s.Unsubscriber.UnSubscribeToSymbolMethod(key)
+			}
+		} else if len(newClients) != len(clients) {
+			s.Symbol_method_subs[key] = newClients
+		}
+	}
 }
