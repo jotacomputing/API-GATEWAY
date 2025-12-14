@@ -15,20 +15,6 @@ type MessageFromUser struct {
     ID     int      `json:"id"`
 }
 
-type Subscriber interface{
-	SubscribeToSymbolMethod(StreamName string)
-}
-
-type UnSubscriber interface {
-	UnSubscribeToSymbolMethod(StreamName string)
-}
-type BroadCaster interface {
-	BroadCasteFromRemote(mess MessageFromPubSubForUser)
-}
-
-type SymbolManagerInjection interface{
-	
-}
 type MessageFromPubSubForUser struct {
 	Stream string          `json:"stream"`
     Data   json.RawMessage `json:"data"` //  raw for routing, then unmarshal specific type
