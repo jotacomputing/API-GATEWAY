@@ -5,7 +5,7 @@ import(
 	 "github.com/redis/go-redis/v9"
 	  "exchange/Contracts"
 	  "context"
-	  "encoding/json"
+	 // "encoding/json"
 	  "fmt"
 	)
 
@@ -64,15 +64,18 @@ func (ps *PubSubManager)SubscribeToSymbolMethod(StreamName string){
 	// this is the reciver go routine for every stream 
 	go func() {
 		for msg := range ch {
-			var m contracts.MessageFromPubSubForUser
+			//var m contracts.MessageFromPubSubForUser
 			fmt.Println("got some  message from pubsusb",  msg)
 			
-			if err := json.Unmarshal([]byte(msg.Payload), &m); err != nil {
-				fmt.Println("Redis message unmarshal error:", err)
-				continue
-			}
+			//if err := json.Unmarshal([]byte(msg.Payload), &m); err != nil {
+			//	fmt.Println("Redis message unmarshal error:", err)
+			//	continue
+			//}
 			// Notify RoomManager (via Broadcaster interface)
-			ps.BroadCaster.BroadCasteFromRemote(m)
+			ps.BroadCaster.BroadCasteFromRemote(contracts.MessageFromPubSubForUser{
+				Stream: msg.Channel,
+				Data:  []byte(msg.Payload),
+			})
 		}
 	}()
 }

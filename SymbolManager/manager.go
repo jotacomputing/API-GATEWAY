@@ -157,6 +157,7 @@ func (sm *SymbolManager) handleBroadcastInternal(cmd contracts.BroadcastCommand)
 	
     for _, client := range sm.Symbol_method_subs[cmd.StreamName] {
 		fmt.Println(client)
+		// important decision to write go or not here
         go client.WriteMessage(websocket.TextMessage, cmd.Data)
     }
 }
