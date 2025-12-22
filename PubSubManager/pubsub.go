@@ -91,7 +91,7 @@ func (ps *PubSubManager) UnSubscribeToSymbolMethod(StreamName string) {
     }
     delete(ps.Subscriptions, StreamName)
     ps.mu.Unlock()
-
+	// unsubscribe methods needs to be called on the pubsub objct only 
     if err := pubsub.Unsubscribe(context.Background(), StreamName); err != nil {
         fmt.Println("Error unsubscribing:", err)
     }

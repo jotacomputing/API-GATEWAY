@@ -5,7 +5,6 @@ import (
 	contracts "exchange/Contracts"
 	"fmt"
 	"sync"
-
 	"github.com/gorilla/websocket"
 )
 
@@ -74,7 +73,7 @@ func (sm *SymbolManager) CleanupConnection(conn *websocket.Conn) {
 // for the pubsusb manager
 func (sm *SymbolManager) BroadCasteFromRemote(message contracts.MessageFromPubSubForUser) {
 	fmt.Println("received brodcast request sedning to channel ")
-	data, _ := json.Marshal(message)
+	data, _ := json.Marshal(message)// marshal means bytes -> struct 
 	sm.CommandChan <- contracts.BroadcastCommand{
 		StreamName: message.Stream,
 		Data:       data,
@@ -158,7 +157,7 @@ func (sm *SymbolManager) handleBroadcastInternal(cmd contracts.BroadcastCommand)
     for _, client := range sm.Symbol_method_subs[cmd.StreamName] {
 		fmt.Println(client)
 		// important decision to write go or not here
-        go client.WriteMessage(websocket.TextMessage, cmd.Data)
+         client.WriteMessage(websocket.TextMessage, cmd.Data)
     }
 }
 

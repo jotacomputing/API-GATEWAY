@@ -3,7 +3,9 @@ package ws
 import (
 	"encoding/json"
 	contracts "exchange/Contracts"
+	symbolmanager "exchange/SymbolManager"
 	"fmt"
+
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
 )
@@ -14,26 +16,21 @@ type ClientMessage struct {
 	Socket  *websocket.Conn // connection objexct needs to be sent along with the message
 	Payload contracts.MessageFromUser
 }
-type Server struct{
-	subscriber contracts.SubscriberForWs
-	unsubscriber contracts.UnSubscriberForWs 
-	cleanup contracts.CleanUpForWs
+type Server struct {
+	// functions from symbol manager that just pass the commands into the channel
+	// no need of the interface
+	symbol_manager_ptr *symbolmanager.SymbolManager
 }
 
 func NewServer(
-    sub contracts.SubscriberForWs,
-    unsub contracts.UnSubscriberForWs,
-    cleanup contracts.CleanUpForWs,
+	symbo_manager_ptr *symbolmanager.SymbolManager,
 ) *Server {
-    return &Server{
-        subscriber:   sub,
-        unsubscriber: unsub,
-        cleanup:      cleanup,
-    }
+	return &Server{
+		symbol_manager_ptr: symbo_manager_ptr,
+	}
 }
 
-
-func (s *Server)wsHandler(c echo.Context) error {
+func (s *Server) wsHandler(c echo.Context) error {
 
 	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 
@@ -41,9 +38,9 @@ func (s *Server)wsHandler(c echo.Context) error {
 		fmt.Println("UPGRADE ERROR:", err)
 		return err
 	}
-	defer func(){
+	defer func() {
 		ws.Close()
-		s.cleanup.CleanupConnection(ws)
+		s.symbol_manager_ptr.CleanupConnection(ws)
 	}()
 
 	var mess contracts.MessageFromUser
@@ -60,22 +57,22 @@ func (s *Server)wsHandler(c echo.Context) error {
 			continue
 		}
 		fmt.Println("Recived message")
-		switch mess.Method{
+		switch mess.Method {
 		case contracts.SUBSCRIBE:
 			if len(mess.Params) > 0 {
-				s.subscriber.Subscribe(mess.Params[0] , ws)
+				s.symbol_manager_ptr.Subscribe(mess.Params[0], ws)
 			}
 
-		case contracts.UNSUBSCRIBE :
+		case contracts.UNSUBSCRIBE:
 			if len(mess.Params) > 0 {
-				s.unsubscriber.UnSubscribe(mess.Params[0] , ws)
+				s.symbol_manager_ptr.UnSubscribe(mess.Params[0], ws)
 			}
 		}
 
 	}
 }
 
-func(s * Server) CreateServer() {
+func (s *Server) CreateServer() {
 	fmt.Println("BOOTING SERVER...")
 
 	e := echo.New()
