@@ -1,5 +1,7 @@
 package shm
 
+import "fmt"
+
 
 type  BrodCaster interface{
 	BrodCast(event OrderEvent)
@@ -35,15 +37,22 @@ func GetShmManager(Balance_Response_queue *BalanceResponseQueue ,
 // function to launch go routines to poll the order events and the query response queue 
 
 func(m*ShmManager)PollOrderEvents(){
+	fmt.Println("startigng poller")
 	for {
+		
 		event , err := m.Order_Events_queue.Dequeue()
+		fmt.Println("got event")
+		
 		if err != nil{
 			return 
 		}
+		if event == nil {
+			continue
+		}
+		fmt.Println(event)
 		m.BrodCaster.BrodCast(*event)
 	}
 }
-
 func(m*ShmManager)PollQueryResponse(){
 	// impl
 }

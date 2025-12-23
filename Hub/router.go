@@ -46,27 +46,29 @@ func (oh *OrderEventsHub) Start() {
 		select {
 		case client := <-oh.registerChan:
 			user_id := client.GetUserId()
+			fmt.Println("registrng")
 			oh.connections[user_id] = append(oh.connections[user_id], client)
+			fmt.Println(oh.connections)
 		case client := <-oh.unregisterChan:
 			user_id := client.GetUserId()
 			if clients, ok := oh.connections[user_id]; ok {
-				// exists
-				// this func handles the cleanup too
 				new_clients := make([]ClientInterface, 0, len(clients)-1)
-
 				for _, connobj := range clients {
 					if connobj != client {
 						new_clients = append(new_clients, connobj)
 					}
 				}
-
+				
 				if len(new_clients) == 0 {
-					delete(oh.connections, user_id)
+					delete(oh.connections, user_id)  
 				} else {
 					oh.connections[user_id] = new_clients
 				}
-
+				
+				close(client.GetSendCh()) // close the channel 
 			}
+		
+			
 		case event := <-oh.broadcastChan:
 			bytes, err := json.Marshal(event)
 			if err != nil {

@@ -6,7 +6,6 @@ import (
 	hub "exchange/Hub"
 	symbolmanager "exchange/SymbolManager"
 	"fmt"
-
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
 )
@@ -97,7 +96,10 @@ func (cl *ClientForOrderEvents)GetSendCh()chan []byte{
 
 func (coe *ClientForOrderEvents) WritePumpForOrderEv() {
     for {
+
         message, ok := <-coe.SendCh  
+		fmt.Println("wrtie routine got message")
+		fmt.Println(string(message))
         if !ok {
            // chnnel closed
             return
@@ -111,7 +113,9 @@ func (coe *ClientForOrderEvents) WritePumpForOrderEv() {
 
 func (s*Server)wsHandlerOrderEvents(c echo.Context)error{
 	// authenticate thishandler , give me the exracted userId 
-	user_id := uint64(0) // give this from auth 
+	fmt.Println("inside handler ")
+	user_id := uint64(20) // give this from auth 
+	fmt.Println(user_id)
 	conn , err := upgrader.Upgrade(c.Response() , c.Request() , nil)
 	if err!=nil{
 		fmt.Println("error upgrading connection")

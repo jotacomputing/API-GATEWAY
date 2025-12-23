@@ -37,11 +37,11 @@ type BalanceResponseHeader struct {
 }
 
 const (
-	BQueueMagic    = 0xDEADBEEF
+	BQueueMagic    = 0xDEADBEEA
 	BQueueCapacity = 65536 // !!IMP: match Rust
 	BalanceResponseSize     = unsafe.Sizeof(BalanceResponse{})
 	BalanceResponseHeaderSize    = unsafe.Sizeof(BalanceResponseHeader{})
-	BalanceResponseTotalSize     = HeaderSize + (QueueCapacity * OrderSize)
+	BalanceResponseTotalSize     = HeaderSize + (BQueueCapacity * BalanceResponseSize)
 )
 
 

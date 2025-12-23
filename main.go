@@ -16,27 +16,27 @@ import (
 func main() {
 	balance_Response_queue , berr := shm.OpenBalanceResponseQueue("/tmp/trading/BalanceResponse")
 	if berr!=nil{
-		return 
+		panic(fmt.Errorf("BalanceResponseQueue error: %w", berr))
 	}
 	cancel_order_queue , cerr := shm.OpenCancelOrderQueue("/tmp/trading/CancelOrders")
 	if cerr!=nil{
-		return
+		panic(fmt.Errorf("OpenCancelOrderQueue error: %w", berr))
 	}
 	holdings_response_queue , herr := shm.OpenHoldingResponseQueue("/tmp/trading/HoldingsResponse")
 	if herr!=nil{
-		return 
+		panic(fmt.Errorf("OpenHoldingResponseQueue error: %w", berr))
 	}
 	order_events_queue , oerr := shm.OpenOrderEventQueue("/tmp/trading/OrderEvents")
 	if oerr!=nil{
-		return 
+		panic(fmt.Errorf("OpenOrderEventQueue error: %w", berr))
 	}
 	post_order_queue , qerr := shm.OpenQueue("/tmp/trading/IncomingOrdersForMe")
 	if qerr!=nil{
-		return
+		panic(fmt.Errorf("OpenQueue error: %w", berr))
 	}
 	queries_queue , querr := shm.OpenQueryQueue("/tmp/trading/Queries")
 	if querr!=nil{
-		return 
+		panic(fmt.Errorf("OpenQueryQueue error: %w", berr))
 	}
 
 	sm := symbolmanager.CreateSymbolManagerSingleton()
