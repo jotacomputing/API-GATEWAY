@@ -16,28 +16,36 @@ type ClientInterface interface{
 // for any type to be a client interface it must implement these functions , so i made client implement these functions this we can use client freely as a ClientInterface 
 type OrderEventsHub struct {
 	connections map[uint64][]ClientInterface 
-	Register    chan ClientInterface
-    Unregister  chan ClientInterface
-    Broadcast   chan shm.OrderEvent
+	registerChan    chan ClientInterface
+    unregisterChan  chan ClientInterface
+    broadcastChan   chan shm.OrderEvent
 }
 
 
 func NewOrderEventHub()*OrderEventsHub{
 	return &OrderEventsHub{
 		connections: make(map[uint64][]ClientInterface),
-		Register: make(chan ClientInterface , 256),
-		Unregister: make(chan ClientInterface , 256),
-		Broadcast: make(chan shm.OrderEvent , 10000),
+		registerChan: make(chan ClientInterface , 256),
+		unregisterChan: make(chan ClientInterface , 256),
+		broadcastChan: make(chan shm.OrderEvent , 10000),
 	}
 }
 // need to expose registern , unregister functions for the server pointer to call them in the hadnler 
+func (oh *OrderEventsHub)Register(client_type ClientInterface){
+	oh.registerChan <- client_type
+}
+func (oh *OrderEventsHub)UnRegister(client_type ClientInterface){
+	oh.unregisterChan <- client_type
+}
+
+
 func(oh*OrderEventsHub)Start(){
 	for {
 		select{
-			case client := <-oh.Register:
+			case client := <-oh.registerChan:
 				user_id := client.GetUserId()
 				oh.connections[user_id] = append(oh.connections[user_id], client)
-			case client := <-oh.Unregister:
+			case client := <-oh.unregisterChan:
 				user_id := client.GetUserId()
 				if clients , ok := oh.connections[user_id]; ok{
 					// exists 
@@ -57,7 +65,7 @@ func(oh*OrderEventsHub)Start(){
 
 				}
 
-			case event := <-oh.Broadcast:
+			case event := <-oh.broadcastChan:
 				bytes , err := json.Marshal(event)
 				if err != nil{
 					fmt.Println("marshal error ")
