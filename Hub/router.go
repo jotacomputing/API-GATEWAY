@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	shm "exchange/Shm"
 	"fmt"
-
-	"github.com/gorilla/websocket"
 )
 
 type ClientInterface interface {
 	GetUserId() uint64
-	GetConnObj() *websocket.Conn
+	//GetConnObj() *websocket.Conn
 	GetSendCh() chan []byte
 }
 
@@ -39,6 +37,10 @@ func (oh *OrderEventsHub) UnRegister(client_type ClientInterface) {
 	oh.unregisterChan <- client_type
 }
 
+func (oh*OrderEventsHub)BrodCast(event shm.OrderEvent){
+	oh.broadcastChan<-event
+}
+
 func (oh *OrderEventsHub) Start() {
 	for {
 		select {
@@ -65,20 +67,26 @@ func (oh *OrderEventsHub) Start() {
 				}
 
 			}
-
 		case event := <-oh.broadcastChan:
 			bytes, err := json.Marshal(event)
 			if err != nil {
-				fmt.Println("marshal error ")
-				return
+				fmt.Println("marshal error:", err)
+				continue  
 			}
+			
 			clients := oh.connections[event.UserId]
-
 			for _, client := range clients {
-
-				client.GetSendCh() <- bytes
-
+				select {
+				case client.GetSendCh() <- bytes:
+					
+				default:
+					// if slow , close the slow client 
+					go func(c ClientInterface) {
+						oh.UnRegister(c)
+					}(client)
+				}
 			}
+		
 
 		}
 	}

@@ -1,6 +1,10 @@
 package shm
 
 
+type  BrodCaster interface{
+	BrodCast(event OrderEvent)
+}
+
 type ShmManager struct{
 	Balance_Response_queue 	*BalanceResponseQueue
 	CancelOrderQueue 	   	*CancelOrderQueue
@@ -8,9 +12,10 @@ type ShmManager struct{
 	Order_Events_queue		*OrderEventQueue
 	Post_Order_queue		*Queue
 	Query_queue				*QueryQueue
+	BrodCaster				BrodCaster
 }
 
-func(m*ShmManager)init(Balance_Response_queue *BalanceResponseQueue , 
+func GetShmManager(Balance_Response_queue *BalanceResponseQueue , 
 	CancelOrderQueue *CancelOrderQueue , 
 	Holding_Response_queue	*HoldingResponseQueue,
 	Order_Evenets_queue		*OrderEventQueue,
@@ -30,9 +35,15 @@ func(m*ShmManager)init(Balance_Response_queue *BalanceResponseQueue ,
 // function to launch go routines to poll the order events and the query response queue 
 
 func(m*ShmManager)PollOrderEvents(){
-	
+	for {
+		event , err := m.Order_Events_queue.Dequeue()
+		if err != nil{
+			return 
+		}
+		m.BrodCaster.BrodCast(*event)
+	}
 }
 
 func(m*ShmManager)PollQueryResponse(){
-
+	// impl
 }

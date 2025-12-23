@@ -80,7 +80,6 @@ type ClientForOrderEvents struct {
 	UserId 	uint64
 	Conn 	*websocket.Conn
 	SendCh	chan []byte
-	hub_ptr *hub.OrderEventsHub // for cleanp logic 
 }
 
 // interface functions for hub 
@@ -96,16 +95,19 @@ func (cl *ClientForOrderEvents)GetSendCh()chan []byte{
 
 
 
-func (coe *ClientForOrderEvents)WritePumpForOrderEv(){
-	// will contnously recive and perform writes 
-	for{
-		message  := <-coe.SendCh
-		if err := coe.Conn.WriteMessage(websocket.BinaryMessage , message); err!=nil{
-			return 
-		}
-		
-	}
+func (coe *ClientForOrderEvents) WritePumpForOrderEv() {
+    for {
+        message, ok := <-coe.SendCh  
+        if !ok {
+           // chnnel closed
+            return
+        }
+        if err := coe.Conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
+            return
+        }
+    }
 }
+
 
 func (s*Server)wsHandlerOrderEvents(c echo.Context)error{
 	// authenticate thishandler , give me the exracted userId 
@@ -121,19 +123,16 @@ func (s*Server)wsHandlerOrderEvents(c echo.Context)error{
 		Conn: conn,
 		SendCh: make(chan []byte , 256),
 	}
+	s.order_events_hub_ptr.Register(client)
+	go client.WritePumpForOrderEv()
 	defer func(){
-		conn.Close()
+		
 		s.order_events_hub_ptr.UnRegister(client)
+		conn.Close()
 		// or
 		//
 		//client.hub_ptr.UnRegister(conn)
 	}()
-
-	go client.WritePumpForOrderEv()
-	s.order_events_hub_ptr.Register(client)
-
-	
-
 	for {
 		_ , _ , err:= client.Conn.ReadMessage()
 		if err!=nil{
