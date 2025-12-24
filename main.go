@@ -3,8 +3,8 @@ package main
 import (
 	pubsubmanager "exchange/PubSubManager"
 	symbolmanager "exchange/SymbolManager"
-	ws "exchange/Ws"
-	shm "exchange/Shm"
+	ws "exchange/ws"
+	shm "exchange/shm"
 	hub "exchange/Hub"
 	"fmt"
 	"os"
@@ -14,27 +14,27 @@ import (
 )
 
 func main() {
-	balance_Response_queue , berr := shm.OpenBalanceResponseQueue("/tmp/trading/BalanceResponse")
+	balance_Response_queue , berr := shm.OpenBalanceResponseQueue("/tmp/BalanceResponse")
 	if berr!=nil{
 		panic(fmt.Errorf("BalanceResponseQueue error: %w", berr))
 	}
-	cancel_order_queue , cerr := shm.OpenCancelOrderQueue("/tmp/trading/CancelOrders")
+	cancel_order_queue , cerr := shm.OpenCancelOrderQueue("/tmp/CancelOrders")
 	if cerr!=nil{
 		panic(fmt.Errorf("OpenCancelOrderQueue error: %w", berr))
 	}
-	holdings_response_queue , herr := shm.OpenHoldingResponseQueue("/tmp/trading/HoldingsResponse")
+	holdings_response_queue , herr := shm.OpenHoldingResponseQueue("/tmp/HoldingsResponse")
 	if herr!=nil{
 		panic(fmt.Errorf("OpenHoldingResponseQueue error: %w", berr))
 	}
-	order_events_queue , oerr := shm.OpenOrderEventQueue("/tmp/trading/OrderEvents")
+	order_events_queue , oerr := shm.OpenOrderEventQueue("/tmp/OrderEvents")
 	if oerr!=nil{
 		panic(fmt.Errorf("OpenOrderEventQueue error: %w", berr))
 	}
-	post_order_queue , qerr := shm.OpenQueue("/tmp/trading/IncomingOrdersForMe")
+	post_order_queue , qerr := shm.OpenQueue("/tmp/IncomingOrders")
 	if qerr!=nil{
 		panic(fmt.Errorf("OpenQueue error: %w", berr))
 	}
-	queries_queue , querr := shm.OpenQueryQueue("/tmp/trading/Queries")
+	queries_queue , querr := shm.OpenQueryQueue("/tmp/Queries")
 	if querr!=nil{
 		panic(fmt.Errorf("OpenQueryQueue error: %w", berr))
 	}
@@ -45,15 +45,6 @@ func main() {
 	sm.Unsubscriber = pubsubm
 	go sm.StartSymbolMnagaer()
 
-
-	order_event_hub := hub.NewOrderEventHub()
-	go order_event_hub.Start()
-	wsServer := ws.NewServer(sm , order_event_hub)
-	go wsServer.CreateServer()
-	
-	
-	
-
 	shmmanager:= shm.ShmManager{
 		Balance_Response_queue: balance_Response_queue,
 		CancelOrderQueue: cancel_order_queue,
@@ -62,6 +53,13 @@ func main() {
 		Post_Order_queue: post_order_queue,
 		Query_queue: queries_queue,
 	}
+
+	order_event_hub := hub.NewOrderEventHub()
+	go order_event_hub.Start()
+	wsServer := ws.NewServer(sm , order_event_hub, &shmmanager)	
+	go wsServer.CreateServer()
+
+	
 	shmmanager.BrodCaster = order_event_hub
 	go shmmanager.PollOrderEvents()
 

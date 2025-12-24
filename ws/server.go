@@ -5,8 +5,23 @@ import (
 	contracts "exchange/Contracts"
 	hub "exchange/Hub"
 	symbolmanager "exchange/SymbolManager"
+	"exchange/db"
 	"fmt"
+
 	"github.com/gorilla/websocket"
+
+	"context"
+	"database/sql"
+	"exchange/shm"
+	"net/http"
+	"strconv"
+
+	echoserver "github.com/dasjott/oauth2-echo-server"
+	"github.com/go-oauth2/oauth2/v4"
+	"github.com/go-oauth2/oauth2/v4/manage"
+	"github.com/go-oauth2/oauth2/v4/models"
+	"github.com/go-oauth2/oauth2/v4/server"
+	"github.com/go-oauth2/oauth2/v4/store"
 	"github.com/labstack/echo/v4"
 )
 
@@ -19,18 +34,70 @@ type ClientMessage struct {
 type Server struct {
 	// functions from symbol manager that just pass the commands into the channel
 	// no need of the interface
-	symbol_manager_ptr *symbolmanager.SymbolManager
-	order_events_hub_ptr 	*hub.OrderEventsHub
+	symbol_manager_ptr   *symbolmanager.SymbolManager
+	order_events_hub_ptr *hub.OrderEventsHub
+	shm_manager_ptr      *shm.ShmManager
 }
 
 func NewServer(
 	symbo_manager_ptr *symbolmanager.SymbolManager,
-	order_events_hub_ptr 	*hub.OrderEventsHub, // for subscirbing unsibsicribing 
+	order_events_hub_ptr *hub.OrderEventsHub, // for subscirbing unsibsicribing
+	shm_manager_ptr *shm.ShmManager,
 ) *Server {
 	return &Server{
-		symbol_manager_ptr: symbo_manager_ptr,
+		symbol_manager_ptr:   symbo_manager_ptr,
 		order_events_hub_ptr: order_events_hub_ptr,
+		shm_manager_ptr:      shm_manager_ptr,
 	}
+}
+
+func (s *Server) PostOrderHandler(c echo.Context) error {
+	// Get authenticated user from OAuth2 token
+	ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
+	if !exists {
+		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
+	}
+
+	// Parse string userID back to uint64 (matches your matching engine)
+	userIDStr := ti.GetUserID()
+	userID, err := strconv.ParseUint(userIDStr, 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
+	} 
+
+	var tempOrder shm.TempOrder
+	if err := c.Bind(&tempOrder); err != nil {
+		return c.JSON(400, map[string]string{"error": "Invalid request body"})
+	}
+
+	// Validate order fields
+	if err := tempOrder.Validate(); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+
+	// Create order with AUTHENTICATED user_id (secure - from token, not request!)
+	var order shm.Order
+	order.OrderID = tempOrder.OrderID
+	order.Price = tempOrder.Price
+	order.Timestamp = tempOrder.Timestamp
+	order.User_id = userID
+	order.Quantity = tempOrder.Quantity
+	order.Symbol = tempOrder.Symbol
+	order.Side = tempOrder.Side
+	order.Order_type = tempOrder.Order_type
+	order.Status = 0 // pending
+
+	// Enqueue the order
+	if err := s.shm_manager_ptr.Post_Order_queue.Enqueue(order); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to enqueue order")
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"status":   "Order placed successfully",
+		"order_id": order.OrderID,
+		"user_id":  order.User_id,
+		"symbol":   order.Symbol,
+	})
 }
 
 func (s *Server) wsHandlerMd(c echo.Context) error {
@@ -76,61 +143,70 @@ func (s *Server) wsHandlerMd(c echo.Context) error {
 }
 
 type ClientForOrderEvents struct {
-	UserId 	uint64
-	Conn 	*websocket.Conn
-	SendCh	chan []byte
+	UserId uint64
+	Conn   *websocket.Conn
+	SendCh chan []byte
 }
 
-// interface functions for hub 
-func (cl *ClientForOrderEvents)GetUserId()uint64{
+// interface functions for hub
+func (cl *ClientForOrderEvents) GetUserId() uint64 {
 	return cl.UserId
 }
-func (cl *ClientForOrderEvents)GetConnObj()*websocket.Conn{
+func (cl *ClientForOrderEvents) GetConnObj() *websocket.Conn {
 	return cl.Conn
 }
-func (cl *ClientForOrderEvents)GetSendCh()chan []byte{
+func (cl *ClientForOrderEvents) GetSendCh() chan []byte {
 	return cl.SendCh
 }
 
-
-
 func (coe *ClientForOrderEvents) WritePumpForOrderEv() {
-    for {
+	for {
 
-        message, ok := <-coe.SendCh  
+		message, ok := <-coe.SendCh
 		fmt.Println("wrtie routine got message")
 		fmt.Println(string(message))
-        if !ok {
-           // chnnel closed
-            return
-        }
-        if err := coe.Conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
-            return
-        }
-    }
+		if !ok {
+			// chnnel closed
+			return
+		}
+		if err := coe.Conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
+			return
+		}
+	}
 }
 
+func (s *Server) wsHandlerOrderEvents(c echo.Context) error {
+	// authenticate thishandler , give me the exracted userId
+	 ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
+	if !exists {
+		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
+	}
 
-func (s*Server)wsHandlerOrderEvents(c echo.Context)error{
-	// authenticate thishandler , give me the exracted userId 
+	// Parse string userID back to uint64 (matches your matching engine)
+	userIDStr := ti.GetUserID()
+	userID, err := strconv.ParseUint(userIDStr, 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
+	}
+ 
 	fmt.Println("inside handler ")
-	user_id := uint64(20) // give this from auth 
+	user_id := userID // give this from auth
 	fmt.Println(user_id)
-	conn , err := upgrader.Upgrade(c.Response() , c.Request() , nil)
-	if err!=nil{
+	conn, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
+	if err != nil {
 		fmt.Println("error upgrading connection")
 		return err
 	}
 
 	client := &ClientForOrderEvents{
 		UserId: user_id,
-		Conn: conn,
-		SendCh: make(chan []byte , 256),
+		Conn:   conn,
+		SendCh: make(chan []byte, 256),
 	}
 	s.order_events_hub_ptr.Register(client)
 	go client.WritePumpForOrderEv()
-	defer func(){
-		
+	defer func() {
+
 		s.order_events_hub_ptr.UnRegister(client)
 		conn.Close()
 		// or
@@ -138,26 +214,98 @@ func (s*Server)wsHandlerOrderEvents(c echo.Context)error{
 		//client.hub_ptr.UnRegister(conn)
 	}()
 	for {
-		_ , _ , err:= client.Conn.ReadMessage()
-		if err!=nil{
+		_, _, err := client.Conn.ReadMessage()
+		if err != nil {
 			fmt.Println("read error")
 			return nil
 		}
 	}
-	// read routine dosent do anyhitng 
+	// read routine dosent do anyhitng
 
-	
 }
 
 func (s *Server) CreateServer() {
 	fmt.Println("BOOTING SERVER...")
 
+	//init db
+	db.InitDB()
+
+	manager := manage.NewDefaultManager()
+	manager.MustTokenStorage(store.NewFileTokenStore("data.db"))
+
+	// Register OAuth2 client
+	clientStore := store.NewClientStore()
+	clientStore.Set("stock-app", &models.Client{
+		ID:     "stock-app",
+		Secret: "supersecret",
+		Domain: "http://localhost:1323",
+	})
+	manager.MapClientStorage(clientStore)
+
+	// Init Echo OAuth2 server
+	echoserver.InitServer(manager)
+	echoserver.SetAllowGetAccessRequest(true)
+	echoserver.SetClientInfoHandler(server.ClientFormHandler)
+
+	// 1) Allow PASSWORD grant
+	echoserver.SetAllowedGrantType(oauth2.PasswordCredentials)
+
+	// 2) Optional: ensure this client may use password grant
+	echoserver.SetClientAuthorizedHandler(func(clientID string, grant oauth2.GrantType) (bool, error) {
+		if clientID == "stock-app" && grant == oauth2.PasswordCredentials {
+			return true, nil
+		}
+		return false, nil
+	})
+
+	// 3) PasswordAuthorizationHandler: check username/password, return user ID
+	echoserver.SetPasswordAuthorizationHandler(
+		func(ctx context.Context, clientID, username, password string) (string, error) {
+			// For testing: accept any non-empty username/password
+			if username == "" || password == "" {
+				return "", echo.NewHTTPError(http.StatusUnauthorized, "invalid credentials")
+			}
+
+			// Optionally verify clientID
+			if clientID != "stock-app" {
+				return "", echo.NewHTTPError(http.StatusUnauthorized, "invalid client")
+			}
+
+			// Find or create user in database
+			user, err := db.FindUserByUsername(username)
+			if err == sql.ErrNoRows {
+				// New user → create with default balance 0.0
+				user, err = db.CreateUser(username, 0.0)
+			}
+			if err != nil {
+				return "", err
+			}
+			return strconv.FormatUint(user.ID, 10), nil
+		},
+	)
+
 	e := echo.New()
-	e.GET("/ws/marketData", s.wsHandlerMd)
-	e.GET("/ws/OrderEvents", s.wsHandlerOrderEvents)
+
+	// OAuth2 endpoint
+	oauth := e.Group("/oauth2")
+	oauth.POST("/token", echoserver.HandleTokenRequest)
+
+	//api endpoints
+	api := e.Group("/api")
+	api.Use(echoserver.TokenHandler())
+
+	api.POST("/order", s.PostOrderHandler)
+	/* api.GET("/balance/:userID", handlers.GetBalanceHandler)
+	api.GET("/holdings/:userID", handlers.GetHoldingsHandler)
+	api.DELETE("/cancel/:orderId", handlers.CancelOrderHandler) */
+
+	ws := e.Group("/ws")
+	ws.Use(echoserver.TokenHandler())
+
+	ws.GET("/marketData", s.wsHandlerMd)
+	ws.GET("/OrderEvents", s.wsHandlerOrderEvents)
 
 	fmt.Println("LISTENING on :8080 ...")
 
-	err := e.Start(":8080")
-	fmt.Println("SERVER EXITED:", err)
+	e.Logger.Fatal(e.Start(":1323"))
 }

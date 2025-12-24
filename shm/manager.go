@@ -41,7 +41,7 @@ func(m*ShmManager)PollOrderEvents(){
 	for {
 		
 		event , err := m.Order_Events_queue.Dequeue()
-		fmt.Println("got event")
+		
 		
 		if err != nil{
 			return 

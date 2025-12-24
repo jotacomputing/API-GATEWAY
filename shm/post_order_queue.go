@@ -1,9 +1,12 @@
 package shm
+
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync/atomic"
 	"unsafe"
+
 	"github.com/edsrzf/mmap-go"
 )
 
@@ -15,18 +18,56 @@ type Order struct {
 	User_id   uint64
 	// Then uint32s (4-byte aligned)
 	Quantity uint32
-	Symbol uint32
+	Symbol   uint32
 	// Then uint8s (1-byte aligned)
-	Side   uint8 // 0=buy, 1=sell
-	Status uint8 // 0=pending, 1=filled, 2=rejected
+	Side       uint8 // 0=buy, 1=sell
+	Status     uint8 // 0=pending, 1=filled, 2=rejected
 	Order_type uint8
 	// Array of bytes last
 	_pad [5]byte
-	
+}
+
+type TempOrder struct {
+	OrderID   uint64
+	Price     uint64
+	Timestamp uint64
+	// then u32s (4-byte aligned)
+	Quantity uint32
+	// then u8s (1-byte aligned)
+	Symbol     uint32
+	Side       uint8 // 0=buy 1=sell
+	Order_type uint8 // 0=market order 1=limit order
+}
+
+func (o *TempOrder) Validate() error {
+
+	if o.Price == 0 && o.Order_type == 1 {
+		// for a limit order, price is required
+		return errors.New("price must be > 0 for limit orders")
+	}
+
+	if o.Quantity == 0 {
+		return errors.New("quantity must be > 0")
+	}
+
+	if o.Side != 0 && o.Side != 1 {
+		return fmt.Errorf("side must be 0 (buy) or 1 (sell), got %d", o.Side)
+	}
+
+	if o.Order_type != 0 && o.Order_type != 1 {
+		return fmt.Errorf("order_type must be 0 (market) or 1 (limit), got %d", o.Order_type)
+	}
+
+	// Optional: timestamp > 0, or within some window, etc.
+	if o.Timestamp == 0 {
+		return errors.New("timestamp must be non-zero")
+	}
+
+	return nil
 }
 
 type QueueHeader struct {
-	ProducerHead uint64   // Offset 0 4 byte interger 
+	ProducerHead uint64   // Offset 0 4 byte interger
 	_pad1        [56]byte // Padding to cache line
 	ConsumerTail uint64   // Offset 64
 	_pad2        [56]byte // Padding
@@ -44,7 +85,7 @@ const (
 
 type Queue struct {
 	file   *os.File
-	mmap   mmap.MMap   // this is the array of bytes wich we will use to read and write 
+	mmap   mmap.MMap // this is the array of bytes wich we will use to read and write
 	header *QueueHeader
 	orders []Order
 }
@@ -68,7 +109,7 @@ func CreateQueue(filePath string) (*Queue, error) {
 		file.Close()
 		return nil, fmt.Errorf("failed to sync file: %w", err)
 	}
-	// m is just a byte array that is mapped to the real file on the Ram 
+	// m is just a byte array that is mapped to the real file on the Ram
 	m, err := mmap.Map(file, mmap.RDWR, 0)
 	if err != nil {
 		file.Close()

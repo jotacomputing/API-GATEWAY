@@ -2,7 +2,7 @@ package hub
 
 import (
 	"encoding/json"
-	shm "exchange/Shm"
+	shm "exchange/shm"
 	"fmt"
 )
 
@@ -37,7 +37,7 @@ func (oh *OrderEventsHub) UnRegister(client_type ClientInterface) {
 	oh.unregisterChan <- client_type
 }
 
-func (oh*OrderEventsHub)BrodCast(event shm.OrderEvent){
+func (oh *OrderEventsHub)BrodCast(event shm.OrderEvent){
 	oh.broadcastChan<-event
 }
 
