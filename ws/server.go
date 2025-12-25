@@ -15,7 +15,7 @@ import (
 	"exchange/shm"
 	"net/http"
 	"strconv"
-
+	"exchange/balances"
 	echoserver "github.com/dasjott/oauth2-echo-server"
 	"github.com/go-oauth2/oauth2/v4"
 	"github.com/go-oauth2/oauth2/v4/manage"
@@ -50,6 +50,51 @@ func NewServer(
 		shm_manager_ptr:      shm_manager_ptr,
 	}
 }
+
+func (s *Server) GetBalanceHandler(c echo.Context) error {
+    ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
+	if !exists {
+		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
+	}
+
+	// Parse string userID back to uint64 (matches your matching engine)
+	userIDStr := ti.GetUserID()
+	userID, err := strconv.ParseUint(userIDStr, 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
+	} 
+
+    snap := balances.GetCurrentSnapshot()
+    bal, ok := snap.Balances[userID]
+    if !ok {
+        bal = shm.UserBalance{UserId: userID} // default zero balance
+    }
+
+    return c.JSON(http.StatusOK, bal)
+}
+
+func (s *Server) GetHoldingsHandler(c echo.Context) error {
+    ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
+	if !exists {
+		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
+	}
+
+	// Parse string userID back to uint64 (matches your matching engine)
+	userIDStr := ti.GetUserID()
+	userID, err := strconv.ParseUint(userIDStr, 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
+	} 
+
+    snap := balances.GetCurrentSnapshot()
+    h, ok := snap.Holdings[userID]
+    if !ok {
+        h = shm.UserHoldings{UserId: userID} // default empty holdings
+    }
+
+    return c.JSON(http.StatusOK, h)
+}
+
 
 func (s *Server) PostOrderHandler(c echo.Context) error {
 	// Get authenticated user from OAuth2 token
@@ -230,6 +275,11 @@ func (s *Server) CreateServer() {
 	//init db
 	db.InitDB()
 
+	balances.InitState()
+
+    go balances.PollBalanceResponses(s.shm_manager_ptr.Balance_Response_queue)
+    go balances.PollHoldingResponses(s.shm_manager_ptr.Holding_Response_queue)
+    go balances.StateUpdater()
 	manager := manage.NewDefaultManager()
 	manager.MustTokenStorage(store.NewFileTokenStore("data.db"))
 
@@ -276,6 +326,22 @@ func (s *Server) CreateServer() {
 			if err == sql.ErrNoRows {
 				// New user → create with default balance 0.0
 				user, err = db.CreateUser(username, 0.0)
+				if err != nil {
+					return "", err
+				}
+
+				//write a query to add user to balance manager
+
+				var query shm.Query
+				query.QueryId = 0   //deafult for new logins
+				query.QueryType = 2 // add user on login
+				query.UserId = uint64(user.ID)
+				// Enqueue the query
+				if s.shm_manager_ptr.Query_queue != nil {
+					s.shm_manager_ptr.Query_queue.Enqueue(query)
+				} else {
+					fmt.Println("Warning: QueriesQueue is nil")
+				}
 			}
 			if err != nil {
 				return "", err
@@ -295,9 +361,9 @@ func (s *Server) CreateServer() {
 	api.Use(echoserver.TokenHandler())
 
 	api.POST("/order", s.PostOrderHandler)
-	/* api.GET("/balance/:userID", handlers.GetBalanceHandler)
-	api.GET("/holdings/:userID", handlers.GetHoldingsHandler)
-	api.DELETE("/cancel/:orderId", handlers.CancelOrderHandler) */
+	api.GET("/balance", s.GetBalanceHandler)
+	api.GET("/holdings", s.GetHoldingsHandler)
+	/* api.DELETE("/cancel/:orderId", handlers.CancelOrderHandler) */
 
 	ws := e.Group("/ws")
 	ws.Use(echoserver.TokenHandler())

@@ -8,7 +8,7 @@ import (
 )
 
 type UserBalance struct{
-	 User_id 			uint64   // 8        
+	 UserId 			uint64   // 8        
      Available_balance  uint64
      Reserved_balance   uint64
      Total_traded_today uint64
