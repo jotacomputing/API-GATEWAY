@@ -15,6 +15,11 @@ type OrderToBeCanceled struct {
 	_    [4]byte
 }
 
+type TempOrderToBeCanceled struct {
+    OrderId uint64 `json:"order_id"`
+    Symbol  uint32 `json:"symbol"`
+}
+
 type CancelOrderQueueHeader struct {
 	ProducerHead uint64   // Offset 0 4 byte interger 
 	_        [56]byte // Padding to cache line

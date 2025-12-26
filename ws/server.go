@@ -95,6 +95,50 @@ func (s *Server) GetHoldingsHandler(c echo.Context) error {
     return c.JSON(http.StatusOK, h)
 }
 
+func (s *Server) CancelOrderHandler(c echo.Context) error {
+	// Get authenticated user from OAuth2 token
+	ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
+	if !exists {
+		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
+	}
+
+	// Parse string userID back to uint64 (matches your matching engine)
+	userIDStr := ti.GetUserID()
+	userID, err := strconv.ParseUint(userIDStr, 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
+	}
+
+	// Get orderId from URL param
+	/* orderIDStr := c.Param("orderId")
+	orderID, err := strconv.ParseUint(orderIDStr, 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "Invalid order ID format")
+	} */
+	
+	var tempOrderToBeCanceled shm.TempOrderToBeCanceled
+	if err := c.Bind(&tempOrderToBeCanceled); err != nil {
+		return c.JSON(400, map[string]string{"error": "Invalid request body"})
+	}
+
+	var cancelOrder shm.OrderToBeCanceled
+	cancelOrder.OrderId = tempOrderToBeCanceled.OrderId
+	cancelOrder.Symbol = tempOrderToBeCanceled.Symbol
+	cancelOrder.UserId = userID
+
+	// Enqueue the cancel order request
+	if err := s.shm_manager_ptr.CancelOrderQueue.Enqueue(cancelOrder); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to enqueue cancel order request")
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"status":   "Cancel order request placed successfully",
+		"order_id": cancelOrder.OrderId,
+		"user_id":  cancelOrder.UserId,
+	})
+}
+
+
 
 func (s *Server) PostOrderHandler(c echo.Context) error {
 	// Get authenticated user from OAuth2 token
@@ -363,7 +407,7 @@ func (s *Server) CreateServer() {
 	api.POST("/order", s.PostOrderHandler)
 	api.GET("/balance", s.GetBalanceHandler)
 	api.GET("/holdings", s.GetHoldingsHandler)
-	/* api.DELETE("/cancel/:orderId", handlers.CancelOrderHandler) */
+	api.DELETE("/cancel", s.CancelOrderHandler) 
 
 	ws := e.Group("/ws")
 	ws.Use(echoserver.TokenHandler())
