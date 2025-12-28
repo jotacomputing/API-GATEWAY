@@ -25,7 +25,16 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-var upgrader = websocket.Upgrader{}
+var upgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool {
+        // Allow localhost origins (adjust ports as needed)
+        origin := r.Header.Get("Origin")
+        return origin == "http://localhost:3000" || 
+               origin == "http://127.0.0.1:3000" ||
+               origin == "http://localhost:1323"
+    },
+}
+
 
 type ClientMessage struct {
 	Socket  *websocket.Conn // connection objexct needs to be sent along with the message
@@ -258,7 +267,7 @@ func (coe *ClientForOrderEvents) WritePumpForOrderEv() {
 			// chnnel closed
 			return
 		}
-		if err := coe.Conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
+		if err := coe.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 			return
 		}
 	}

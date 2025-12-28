@@ -28,15 +28,13 @@ type Order struct {
 }
 
 type TempOrder struct {
-	OrderID   uint64
-	Price     uint64
-	Timestamp uint64
-	// then u32s (4-byte aligned)
-	Quantity uint32
-	// then u8s (1-byte aligned)
-	Symbol     uint32
-	Side       uint8 // 0=buy 1=sell
-	Order_type uint8 // 0=market order 1=limit order
+    OrderID    uint64 `json:"order_id"`
+    Price      uint64 `json:"price"`
+    Timestamp  uint64 `json:"timestamp"`
+    Quantity   uint32 `json:"quantity"`
+    Symbol     uint32 `json:"symbol"`
+    Side       uint8  `json:"side"`
+    Order_type uint8  `json:"order_type"`
 }
 
 func (o *TempOrder) Validate() error {
