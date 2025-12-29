@@ -7,34 +7,46 @@ import (
 	symbolmanager "exchange/SymbolManager"
 	"exchange/db"
 	"fmt"
+	"log"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/websocket"
 
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+
 	"context"
-	"database/sql"
+	"exchange/balances"
 	"exchange/shm"
 	"net/http"
-	"strconv"
-	"exchange/balances"
-	echoserver "github.com/dasjott/oauth2-echo-server"
-	"github.com/go-oauth2/oauth2/v4"
-	"github.com/go-oauth2/oauth2/v4/manage"
-	"github.com/go-oauth2/oauth2/v4/models"
-	"github.com/go-oauth2/oauth2/v4/server"
-	"github.com/go-oauth2/oauth2/v4/store"
+	"os"
+	"strconv" // for cookie
+
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 )
 
-var upgrader = websocket.Upgrader{
-    CheckOrigin: func(r *http.Request) bool {
-        // Allow localhost origins (adjust ports as needed)
-        origin := r.Header.Get("Origin")
-        return origin == "http://localhost:3000" || 
-               origin == "http://127.0.0.1:3000" ||
-               origin == "http://localhost:1323"
-    },
+var googleOauthConfig = &oauth2.Config{
+	ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+	ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+	RedirectURL:  "http://localhost:1323/auth/google/callback",
+	Scopes:       []string{"openid", "email", "profile"},
+	Endpoint:     google.Endpoint,
 }
 
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		// Allow localhost origins (adjust ports as needed)
+		origin := r.Header.Get("Origin")
+		return origin == "http://localhost:3000" ||
+			origin == "http://127.0.0.1:3000" ||
+			origin == "http://localhost:1323"
+	},
+}
 
 type ClientMessage struct {
 	Socket  *websocket.Conn // connection objexct needs to be sent along with the message
@@ -61,62 +73,31 @@ func NewServer(
 }
 
 func (s *Server) GetBalanceHandler(c echo.Context) error {
-    ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
-	if !exists {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
+	userID := c.Get("user_id").(uint64)
+
+	snap := balances.GetCurrentSnapshot()
+	bal, ok := snap.Balances[userID]
+	if !ok {
+		bal = shm.UserBalance{UserId: userID} // default zero balance
 	}
 
-	// Parse string userID back to uint64 (matches your matching engine)
-	userIDStr := ti.GetUserID()
-	userID, err := strconv.ParseUint(userIDStr, 10, 64)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
-	} 
-
-    snap := balances.GetCurrentSnapshot()
-    bal, ok := snap.Balances[userID]
-    if !ok {
-        bal = shm.UserBalance{UserId: userID} // default zero balance
-    }
-
-    return c.JSON(http.StatusOK, bal)
+	return c.JSON(http.StatusOK, bal)
 }
 
 func (s *Server) GetHoldingsHandler(c echo.Context) error {
-    ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
-	if !exists {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
+	userID := c.Get("user_id").(uint64)
+
+	snap := balances.GetCurrentSnapshot()
+	h, ok := snap.Holdings[userID]
+	if !ok {
+		h = shm.UserHoldings{UserId: userID} // default empty holdings
 	}
 
-	// Parse string userID back to uint64 (matches your matching engine)
-	userIDStr := ti.GetUserID()
-	userID, err := strconv.ParseUint(userIDStr, 10, 64)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
-	} 
-
-    snap := balances.GetCurrentSnapshot()
-    h, ok := snap.Holdings[userID]
-    if !ok {
-        h = shm.UserHoldings{UserId: userID} // default empty holdings
-    }
-
-    return c.JSON(http.StatusOK, h)
+	return c.JSON(http.StatusOK, h)
 }
 
 func (s *Server) CancelOrderHandler(c echo.Context) error {
-	// Get authenticated user from OAuth2 token
-	ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
-	if !exists {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
-	}
-
-	// Parse string userID back to uint64 (matches your matching engine)
-	userIDStr := ti.GetUserID()
-	userID, err := strconv.ParseUint(userIDStr, 10, 64)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
-	}
+	userID := c.Get("user_id").(uint64)
 
 	// Get orderId from URL param
 	/* orderIDStr := c.Param("orderId")
@@ -124,7 +105,7 @@ func (s *Server) CancelOrderHandler(c echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "Invalid order ID format")
 	} */
-	
+
 	var tempOrderToBeCanceled shm.TempOrderToBeCanceled
 	if err := c.Bind(&tempOrderToBeCanceled); err != nil {
 		return c.JSON(400, map[string]string{"error": "Invalid request body"})
@@ -147,21 +128,8 @@ func (s *Server) CancelOrderHandler(c echo.Context) error {
 	})
 }
 
-
-
 func (s *Server) PostOrderHandler(c echo.Context) error {
-	// Get authenticated user from OAuth2 token
-	ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
-	if !exists {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
-	}
-
-	// Parse string userID back to uint64 (matches your matching engine)
-	userIDStr := ti.GetUserID()
-	userID, err := strconv.ParseUint(userIDStr, 10, 64)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
-	} 
+	userID := c.Get("user_id").(uint64)
 
 	var tempOrder shm.TempOrder
 	if err := c.Bind(&tempOrder); err != nil {
@@ -274,19 +242,8 @@ func (coe *ClientForOrderEvents) WritePumpForOrderEv() {
 }
 
 func (s *Server) wsHandlerOrderEvents(c echo.Context) error {
-	// authenticate thishandler , give me the exracted userId
-	 ti, exists := c.Get(echoserver.DefaultConfig.TokenKey).(oauth2.TokenInfo)
-	if !exists {
-		return echo.NewHTTPError(http.StatusUnauthorized, "Invalid or missing token")
-	}
+	userID := c.Get("user_id").(uint64)
 
-	// Parse string userID back to uint64 (matches your matching engine)
-	userIDStr := ti.GetUserID()
-	userID, err := strconv.ParseUint(userIDStr, 10, 64)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Invalid user ID format")
-	}
- 
 	fmt.Println("inside handler ")
 	user_id := userID // give this from auth
 	fmt.Println(user_id)
@@ -322,109 +279,165 @@ func (s *Server) wsHandlerOrderEvents(c echo.Context) error {
 
 }
 
+// JWT Middleware
+var jwtSecret = []byte("your-super-secret-jwt-key-change-in-prod") // Or load from env
+
+// JWT Middleware - Replaces echoserver.TokenHandler()
+func jwtMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			authHeader := c.Request().Header.Get("Authorization")
+			if authHeader == "" {
+				return echo.ErrUnauthorized
+			}
+
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+			token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+				return jwtSecret, nil
+			})
+			if err != nil || !token.Valid {
+				return echo.ErrUnauthorized
+			}
+
+			claims, ok := token.Claims.(jwt.MapClaims)
+			if !ok {
+				return echo.ErrUnauthorized
+			}
+
+			userIDStr, ok := claims["user_id"].(string)
+			if !ok { return echo.ErrUnauthorized }
+			userID, err := strconv.ParseUint(userIDStr, 10, 64)
+			if err != nil { return echo.ErrUnauthorized }
+			c.Set("user_id", userID)  // uint64 
+
+			return next(c)
+		}
+	}
+}
+
+// Google OAuth Redirect
+func googleAuthRedirect(c echo.Context) error {
+    state := fmt.Sprintf("%d", time.Now().UnixNano())
+    c.SetCookie(&http.Cookie{
+        Name:  "oauth_state",
+        Value: state,
+        Path:  "/",
+    })
+    url := googleOauthConfig.AuthCodeURL(state) 
+    return c.Redirect(http.StatusTemporaryRedirect, url)
+}
+
+
+// Google Callback → FindOrCreateUser → Issue JWT
+func googleCallback(c echo.Context) error {
+	code := c.QueryParam("code")
+	if code == "" {
+		return c.JSON(400, map[string]string{"error": "Missing code"})
+	}
+
+	ctx := c.Request().Context() 
+
+	// Exchange code for tokens
+	oauthToken, err := googleOauthConfig.Exchange(ctx, code)
+	if err != nil {
+		return c.JSON(500, map[string]string{"error": "Token exchange failed: " + err.Error()})
+	}
+
+	// Get user info
+	client := googleOauthConfig.Client(ctx, oauthToken)
+	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	if err != nil {
+		return c.JSON(500, map[string]string{"error": "Userinfo failed: " + err.Error()})
+	}
+	defer resp.Body.Close()
+
+	var userinfo struct {
+		ID    string `json:"id"`
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&userinfo); err != nil {
+		return c.JSON(500, map[string]string{"error": "Decode userinfo failed"})
+	}
+
+	// Find or create user - use REAL Google user ID
+	user, err := db.FindOrCreateOAuthUser(ctx, "google", userinfo.ID, userinfo.Email, userinfo.Name)
+	if err != nil {
+		return c.JSON(500, map[string]string{"error": "User creation failed: " + err.Error()})
+	}
+	// Issue JWT
+	jwtToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+    "user_id": strconv.FormatUint(uint64(user.ID), 10),  // STRING "123"
+    "email":   *user.Email,
+    "exp":     time.Now().Add(time.Hour * 24).Unix(),
+	})
+	jwtString, err := jwtToken.SignedString(jwtSecret)
+	if err != nil {
+		return c.JSON(500, map[string]string{"error": "JWT signing failed"})
+	}
+
+	// Redirect to frontend with JWT
+	redirectURL := "http://localhost:3000/dashboard?token=" + jwtString + "&user_id=" + strconv.FormatInt(user.ID, 10)
+	return c.Redirect(http.StatusTemporaryRedirect, redirectURL)
+}
+
 func (s *Server) CreateServer() {
 	fmt.Println("BOOTING SERVER...")
 
 	//init db
-	db.InitDB()
-
+	if err := db.InitDB("postgres://stock_user:stock_pass@localhost:5432/stock_exchange?sslmode=disable"); err != nil {
+		log.Fatalf("DB init failed: %v", err)
+	}
 	balances.InitState()
 
-    go balances.PollBalanceResponses(s.shm_manager_ptr.Balance_Response_queue)
-    go balances.PollHoldingResponses(s.shm_manager_ptr.Holding_Response_queue)
-    go balances.StateUpdater()
-	manager := manage.NewDefaultManager()
-	manager.MustTokenStorage(store.NewFileTokenStore("data.db"))
-
-	// Register OAuth2 client
-	clientStore := store.NewClientStore()
-	clientStore.Set("stock-app", &models.Client{
-		ID:     "stock-app",
-		Secret: "supersecret",
-		Domain: "http://localhost:1323",
-	})
-	manager.MapClientStorage(clientStore)
-
-	// Init Echo OAuth2 server
-	echoserver.InitServer(manager)
-	echoserver.SetAllowGetAccessRequest(true)
-	echoserver.SetClientInfoHandler(server.ClientFormHandler)
-
-	// 1) Allow PASSWORD grant
-	echoserver.SetAllowedGrantType(oauth2.PasswordCredentials)
-
-	// 2) Optional: ensure this client may use password grant
-	echoserver.SetClientAuthorizedHandler(func(clientID string, grant oauth2.GrantType) (bool, error) {
-		if clientID == "stock-app" && grant == oauth2.PasswordCredentials {
-			return true, nil
-		}
-		return false, nil
-	})
-
-	// 3) PasswordAuthorizationHandler: check username/password, return user ID
-	echoserver.SetPasswordAuthorizationHandler(
-		func(ctx context.Context, clientID, username, password string) (string, error) {
-			// For testing: accept any non-empty username/password
-			if username == "" || password == "" {
-				return "", echo.NewHTTPError(http.StatusUnauthorized, "invalid credentials")
-			}
-
-			// Optionally verify clientID
-			if clientID != "stock-app" {
-				return "", echo.NewHTTPError(http.StatusUnauthorized, "invalid client")
-			}
-
-			// Find or create user in database
-			user, err := db.FindUserByUsername(username)
-			if err == sql.ErrNoRows {
-				// New user → create with default balance 0.0
-				user, err = db.CreateUser(username, 0.0)
-				if err != nil {
-					return "", err
-				}
-
-				//write a query to add user to balance manager
-
-				var query shm.Query
-				query.QueryId = 0   //deafult for new logins
-				query.QueryType = 2 // add user on login
-				query.UserId = uint64(user.ID)
-				// Enqueue the query
-				if s.shm_manager_ptr.Query_queue != nil {
-					s.shm_manager_ptr.Query_queue.Enqueue(query)
-				} else {
-					fmt.Println("Warning: QueriesQueue is nil")
-				}
-			}
-			if err != nil {
-				return "", err
-			}
-			return strconv.FormatUint(user.ID, 10), nil
-		},
-	)
+	go balances.PollBalanceResponses(s.shm_manager_ptr.Balance_Response_queue)
+	go balances.PollHoldingResponses(s.shm_manager_ptr.Holding_Response_queue)
+	go balances.StateUpdater()
 
 	e := echo.New()
 
-	// OAuth2 endpoint
-	oauth := e.Group("/oauth2")
-	oauth.POST("/token", echoserver.HandleTokenRequest)
+	// CORS + Middleware
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"http://localhost:3000", "http://127.0.0.1:3000"},
+		AllowMethods: []string{echo.GET, echo.POST},
+	}))
+	e.Use(middleware.RequestLogger())
+	e.Use(middleware.Recover())
 
-	//api endpoints
+	
+	e.GET("/auth/google", googleAuthRedirect)
+	//e.GET("/auth/github", githubAuthRedirect)
+
+	// OAuth Callbacks - Exchange code → JWT
+	e.GET("/auth/google/callback", googleCallback)
+	//e.GET("/auth/github/callback", githubCallback)
+
+	
 	api := e.Group("/api")
-	api.Use(echoserver.TokenHandler())
+	api.Use(jwtMiddleware()) 
 
 	api.POST("/order", s.PostOrderHandler)
 	api.GET("/balance", s.GetBalanceHandler)
 	api.GET("/holdings", s.GetHoldingsHandler)
-	api.DELETE("/cancel", s.CancelOrderHandler) 
+	api.DELETE("/cancel", s.CancelOrderHandler)
 
 	ws := e.Group("/ws")
-	ws.Use(echoserver.TokenHandler())
-
+	ws.Use(jwtMiddleware())
 	ws.GET("/marketData", s.wsHandlerMd)
 	ws.GET("/OrderEvents", s.wsHandlerOrderEvents)
 
-	fmt.Println("LISTENING on :8080 ...")
+	go func() {
+		if err := e.Start(":1323"); err != nil && err != http.ErrServerClosed {
+			log.Fatal("Server:", err)
+		}
+	}()
 
-	e.Logger.Fatal(e.Start(":1323"))
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down...")
+	db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	e.Shutdown(ctx)  // Remove defer
+	cancel()
 }
