@@ -19,9 +19,11 @@ type UserHoldings struct {
 
 
 type HoldingResponse struct {
-	QueryId  uint64
 	UserId   uint64
-	Response UserHoldings
+	Symbol   uint32
+	delta_available_holdings  int32
+	delta_reserved_holdings   int32
+	_pad	 [4]byte
 }
 
 

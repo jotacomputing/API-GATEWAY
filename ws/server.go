@@ -12,10 +12,11 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
+	_ "io"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/websocket"
 
+	"github.com/joho/godotenv"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
@@ -30,14 +31,6 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 )
 
-var googleOauthConfig = &oauth2.Config{
-	ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
-	ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-	RedirectURL:  "http://localhost:1323/auth/google/callback",
-	Scopes:       []string{"openid", "email", "profile"},
-	Endpoint:     google.Endpoint,
-}
-
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		// Allow localhost origins (adjust ports as needed)
@@ -47,6 +40,7 @@ var upgrader = websocket.Upgrader{
 			origin == "http://localhost:1323"
 	},
 }
+var googleOauthConfig *oauth2.Config
 
 type ClientMessage struct {
 	Socket  *websocket.Conn // connection objexct needs to be sent along with the message
@@ -146,7 +140,7 @@ func (s *Server) PostOrderHandler(c echo.Context) error {
 	order.OrderID = tempOrder.OrderID
 	order.Price = tempOrder.Price
 	order.Timestamp = tempOrder.Timestamp
-	order.User_id = userID
+	order.UserId = userID
 	order.Quantity = tempOrder.Quantity
 	order.Symbol = tempOrder.Symbol
 	order.Side = tempOrder.Side
@@ -158,12 +152,34 @@ func (s *Server) PostOrderHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to enqueue order")
 	}
 
+	go func(order shm.Order) {
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+
+    if err := db.RecordPendingOrder(ctx, order); err != nil {
+        log.Printf("RecordPendingOrder failed: %v", err)
+    }
+	}(order)
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"status":   "Order placed successfully",
 		"order_id": order.OrderID,
-		"user_id":  order.User_id,
+		"user_id":  order.UserId,
 		"symbol":   order.Symbol,
 	})
+}
+
+func (s *Server) GetUserOrdersHandler(c echo.Context) error {
+	userID := c.Get("user_id").(uint64)
+	limit := int32(50)
+	offset := int32(0)
+
+	orders, err := db.GetUserOrders(c.Request().Context(), userID, limit, offset)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, orders)
 }
 
 func (s *Server) wsHandlerMd(c echo.Context) error {
@@ -305,10 +321,14 @@ func jwtMiddleware() echo.MiddlewareFunc {
 			}
 
 			userIDStr, ok := claims["user_id"].(string)
-			if !ok { return echo.ErrUnauthorized }
+			if !ok {
+				return echo.ErrUnauthorized
+			}
 			userID, err := strconv.ParseUint(userIDStr, 10, 64)
-			if err != nil { return echo.ErrUnauthorized }
-			c.Set("user_id", userID)  // uint64 
+			if err != nil {
+				return echo.ErrUnauthorized
+			}
+			c.Set("user_id", userID) // uint64
 
 			return next(c)
 		}
@@ -317,25 +337,24 @@ func jwtMiddleware() echo.MiddlewareFunc {
 
 // Google OAuth Redirect
 func googleAuthRedirect(c echo.Context) error {
-    state := fmt.Sprintf("%d", time.Now().UnixNano())
-    c.SetCookie(&http.Cookie{
-        Name:  "oauth_state",
-        Value: state,
-        Path:  "/",
-    })
-    url := googleOauthConfig.AuthCodeURL(state) 
-    return c.Redirect(http.StatusTemporaryRedirect, url)
+	state := fmt.Sprintf("%d", time.Now().UnixNano())
+	c.SetCookie(&http.Cookie{
+		Name:  "oauth_state",
+		Value: state,
+		Path:  "/",
+	})
+	url := googleOauthConfig.AuthCodeURL(state)
+	return c.Redirect(http.StatusTemporaryRedirect, url)
 }
 
-
 // Google Callback → FindOrCreateUser → Issue JWT
-func googleCallback(c echo.Context) error {
+func (s *Server) googleCallback(c echo.Context) error {
 	code := c.QueryParam("code")
 	if code == "" {
 		return c.JSON(400, map[string]string{"error": "Missing code"})
 	}
 
-	ctx := c.Request().Context() 
+	ctx := c.Request().Context()
 
 	// Exchange code for tokens
 	oauthToken, err := googleOauthConfig.Exchange(ctx, code)
@@ -356,33 +375,61 @@ func googleCallback(c echo.Context) error {
 		Email string `json:"email"`
 		Name  string `json:"name"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&userinfo); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&userinfo);
+	err != nil {
 		return c.JSON(500, map[string]string{"error": "Decode userinfo failed"})
 	}
 
 	// Find or create user - use REAL Google user ID
-	user, err := db.FindOrCreateOAuthUser(ctx, "google", userinfo.ID, userinfo.Email, userinfo.Name)
+	if(s.shm_manager_ptr==nil){
+		log.Println("SHM MANAGER PTR IS NIL IN GOOGLE CALLBACK")
+	}
+
+	user, err := db.FindOrCreateOAuthUser(ctx, "google", userinfo.ID, userinfo.Email, userinfo.Name,s.shm_manager_ptr)
 	if err != nil {
 		return c.JSON(500, map[string]string{"error": "User creation failed: " + err.Error()})
 	}
 	// Issue JWT
 	jwtToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-    "user_id": strconv.FormatUint(uint64(user.ID), 10),  // STRING "123"
-    "email":   *user.Email,
-    "exp":     time.Now().Add(time.Hour * 24).Unix(),
+		"user_id": strconv.FormatUint(uint64(user.ID), 10),
+		"email":   *user.Email,
+		"exp":     time.Now().Add(time.Hour * 24).Unix(),
 	})
 	jwtString, err := jwtToken.SignedString(jwtSecret)
 	if err != nil {
 		return c.JSON(500, map[string]string{"error": "JWT signing failed"})
 	}
 
-	// Redirect to frontend with JWT
+	/* // Redirect to frontend with JWT
 	redirectURL := "http://localhost:3000/dashboard?token=" + jwtString + "&user_id=" + strconv.FormatInt(user.ID, 10)
-	return c.Redirect(http.StatusTemporaryRedirect, redirectURL)
+	return c.Redirect(http.StatusTemporaryRedirect, redirectURL) */
+	return c.JSON(http.StatusOK, map[string]any{
+    "token":   jwtString,
+    "user_id": strconv.FormatUint(uint64(user.ID), 10),
+    "email":   user.Email, // keep as pointer if you want
+	})
 }
 
 func (s *Server) CreateServer() {
 	fmt.Println("BOOTING SERVER...")
+	// Load .env
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found - using system env")
+	}
+
+	// Create config NOW (after .env loaded)
+	googleOauthConfig = &oauth2.Config{
+		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+		RedirectURL:  "http://localhost:1323/auth/google/callback",
+		Scopes:       []string{"openid", "email", "profile"},
+		Endpoint:     google.Endpoint,
+	}
+	if googleOauthConfig.ClientID == "" {
+		log.Fatal(" GOOGLE_CLIENT_ID missing!")
+	}
+	fmt.Println("Google OAuth ready:", googleOauthConfig.ClientID)
 
 	//init db
 	if err := db.InitDB("postgres://stock_user:stock_pass@localhost:5432/stock_exchange?sslmode=disable"); err != nil {
@@ -390,36 +437,39 @@ func (s *Server) CreateServer() {
 	}
 	balances.InitState()
 
-	go balances.PollBalanceResponses(s.shm_manager_ptr.Balance_Response_queue)
-	go balances.PollHoldingResponses(s.shm_manager_ptr.Holding_Response_queue)
-	go balances.StateUpdater()
+	//go balances.PollBalanceResponses(s.shm_manager_ptr.Balance_Response_queue)
+	//go balances.PollHoldingResponses(s.shm_manager_ptr.Holding_Response_queue)
+	//go balances.StateUpdater()
 
 	e := echo.New()
 
 	// CORS + Middleware
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"http://localhost:3000", "http://127.0.0.1:3000"},
-		AllowMethods: []string{echo.GET, echo.POST},
+		AllowOrigins: []string{"http://localhost:3000", "http://127.0.0.1:3000","http://localhost:1323"},
+		AllowMethods: []string{echo.GET, echo.POST, echo.DELETE},
+		AllowHeaders: []string{echo.HeaderAuthorization, echo.HeaderContentType},
 	}))
 	e.Use(middleware.RequestLogger())
 	e.Use(middleware.Recover())
+	e.Use(middleware.RecoverWithConfig(middleware.RecoverConfig{
+    DisablePrintStack: false,  // ⭐ SHOW FULL STACK TRACE
+	}))
 
-	
 	e.GET("/auth/google", googleAuthRedirect)
 	//e.GET("/auth/github", githubAuthRedirect)
 
 	// OAuth Callbacks - Exchange code → JWT
-	e.GET("/auth/google/callback", googleCallback)
+	e.GET("/auth/google/callback",s.googleCallback)
 	//e.GET("/auth/github/callback", githubCallback)
 
-	
 	api := e.Group("/api")
-	api.Use(jwtMiddleware()) 
+	api.Use(jwtMiddleware())
 
 	api.POST("/order", s.PostOrderHandler)
 	api.GET("/balance", s.GetBalanceHandler)
 	api.GET("/holdings", s.GetHoldingsHandler)
 	api.DELETE("/cancel", s.CancelOrderHandler)
+	api.GET("/orders", s.GetUserOrdersHandler)
 
 	ws := e.Group("/ws")
 	ws.Use(jwtMiddleware())
@@ -438,6 +488,6 @@ func (s *Server) CreateServer() {
 	log.Println("Shutting down...")
 	db.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	e.Shutdown(ctx)  // Remove defer
+	e.Shutdown(ctx) // Remove defer
 	cancel()
 }

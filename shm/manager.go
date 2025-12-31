@@ -50,7 +50,9 @@ func(m*ShmManager)PollOrderEvents(){
 			continue
 		}
 		fmt.Println(event)
+
 		m.BrodCaster.BrodCast(*event)
+		//go routines for each event to write in db
 	}
 }
 func(m*ShmManager)PollQueryResponse(){

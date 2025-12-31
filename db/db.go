@@ -3,10 +3,13 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"exchange/shm"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -47,7 +50,11 @@ func InitDB(dsn string) error {
 	log.Println("✅ pgxpool connected:", dsn)
 
 	// Create schema (idempotent)
+	// Replace the single Exec with these sequential calls
 	ctx := context.Background()
+
+	// 1. Create tables first (no inline indexes)
+	// 1. Create tables first
 	_, err = pool.Exec(ctx, `
         CREATE TABLE IF NOT EXISTS users (
             id BIGSERIAL PRIMARY KEY,
@@ -80,44 +87,45 @@ func InitDB(dsn string) error {
             UNIQUE(user_id, symbol)
         );
 
-        CREATE TABLE IF NOT EXISTS user_orders (
-            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            order_id BIGINT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT now(),
-            PRIMARY KEY(user_id, order_id)
-        );
+        DROP TABLE IF EXISTS user_orders;
 
         CREATE TABLE IF NOT EXISTS orders (
             id BIGSERIAL PRIMARY KEY,
             order_id BIGINT UNIQUE NOT NULL,
+            user_id BIGINT NOT NULL,
             symbol INTEGER NOT NULL,
             side SMALLINT NOT NULL,
             order_type SMALLINT NOT NULL,
+            status SMALLINT NOT NULL DEFAULT 0,
             price NUMERIC(18,8),
             quantity NUMERIC(18,8) NOT NULL,
             filled_qty NUMERIC(18,8) DEFAULT 0,
-            status SMALLINT NOT NULL,
             reject_reason VARCHAR(128),
+            timestamp BIGINT NOT NULL,
             created_at TIMESTAMPTZ DEFAULT now(),
             updated_at TIMESTAMPTZ DEFAULT now()
         );
-
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_user_status 
-            ON orders(user_id, status) WHERE status = 0;
-        
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_user_orders_user 
-            ON user_orders(user_id);
     `)
 	if err != nil {
-		return fmt.Errorf("schema migration: %w", err)
+		return fmt.Errorf("create tables: %w", err)
 	}
 
-	log.Println("✅ Database schema ready")
+	// 2. Create indexes WITHOUT CONCURRENTLY (fast for empty tables at startup)
+	_, err = pool.Exec(ctx, `
+        CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders(user_id, status);
+        CREATE INDEX IF NOT EXISTS idx_orders_symbol_status ON orders(symbol, status);
+        CREATE INDEX IF NOT EXISTS idx_orders_user_time ON orders(user_id, created_at DESC);
+    `)
+	if err != nil {
+		return fmt.Errorf("create indexes: %w", err)
+	}
+
+	log.Println(" Database schema ready")
 	return nil
 }
 
 // PRODUCTION FindOrCreateOAuthUser (transactional, handles races)
-func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email, username string) (*User, error) {
+func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email, username string, shm_manager_ptr *shm.ShmManager) (*User, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -133,7 +141,7 @@ func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email,
         FOR UPDATE OF u
     `, provider, providerUserID).Scan(&user.ID, &user.Email, &user.Username, &user.CreatedAt)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 		// Create new user atomically
 		err = tx.QueryRow(ctx, `
             INSERT INTO users (email, username)
@@ -144,6 +152,13 @@ func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email,
 			return nil, fmt.Errorf("create user: %w", err)
 		}
 
+		if shm_manager_ptr != nil && shm_manager_ptr.Query_queue != nil {
+			var query shm.Query
+			query.QueryId = 0
+			query.QueryType = 2
+			query.UserId = uint64(user.ID)
+			shm_manager_ptr.Query_queue.Enqueue(query)  // Safe - nil check
+		}
 		// Link OAuth account
 		_, err = tx.Exec(ctx, `
             INSERT INTO oauth_accounts (user_id, provider, provider_user_id)
@@ -170,6 +185,87 @@ func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email,
 	}
 
 	return &user, nil
+}
+
+// 1. Record incoming order (status=0, pending)
+func RecordPendingOrder(ctx context.Context, order shm.Order) error {
+	_, err := pool.Exec(ctx, `
+        INSERT INTO orders (
+            order_id, user_id, symbol, side, order_type, status, 
+            price, quantity, timestamp
+        ) VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8)
+        ON CONFLICT (order_id) DO NOTHING
+    `,
+		order.OrderID,
+		order.UserId,
+		int32(order.Symbol),
+		int16(order.Side),
+		int16(order.Order_type),
+		int64(order.Price),
+		int32(order.Quantity),
+		order.Timestamp,
+	)
+	return err
+}
+
+// 2. Record cancel request (status=3, cancel_requested)
+func RecordCancelRequest(ctx context.Context, userID uint64, orderID uint64, symbol uint32) error {
+	_, err := pool.Exec(ctx, `
+        UPDATE orders 
+        SET status = 3, reject_reason = 'cancel_requested', updated_at = now()
+        WHERE order_id = $1 AND user_id = $2 AND symbol = $3 AND status = 0
+    `, orderID, userID, int32(symbol))
+	return err
+}
+
+type Order struct {
+	ID           int64     `json:"id"`
+	OrderID      uint64    `json:"order_id"`
+	Symbol       int32     `json:"symbol"`	
+	Side         int16     `json:"side"`
+	OrderType    int16     `json:"order_type"`
+	Status       int16     `json:"status"`
+	Price        float64   `json:"price"`
+	Quantity     float64   `json:"quantity"`
+	FilledQty    float64   `json:"filled_qty"`
+	RejectReason *string   `json:"reject_reason,omitempty"`
+	Timestamp    uint64    `json:"timestamp"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func GetUserOrders(ctx context.Context, userID uint64, limit int32, offset int32) ([]Order, error) {
+	rows, err := pool.Query(ctx, `
+        SELECT id, order_id, symbol, side, order_type, status, 
+               price, quantity, filled_qty, reject_reason, 
+               timestamp, created_at, updated_at
+        FROM orders 
+        WHERE user_id = $1 
+        ORDER BY created_at DESC 
+        LIMIT $2 OFFSET $3
+    `, userID, limit, offset)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var orders []Order
+	for rows.Next() {
+		var order Order
+		err := rows.Scan(
+			&order.ID, &order.OrderID, &order.Symbol, &order.Side,
+			&order.OrderType, &order.Status, &order.Price, &order.Quantity,
+			&order.FilledQty, &order.RejectReason, &order.Timestamp,
+			&order.CreatedAt, &order.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		orders = append(orders, order)
+	}
+
+	return orders, rows.Err()
 }
 
 // Close pool on shutdown

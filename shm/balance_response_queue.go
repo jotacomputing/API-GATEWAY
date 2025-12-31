@@ -18,13 +18,9 @@ type UserBalance struct{
 // user balance 64 bytes 
 
 type BalanceResponse struct {
-	// All uint64s first (8-byte aligned)
-	QueryId uint64  // 8
-	UserId  uint64  // 8 
-	ResponseType uint8  //1 
-	_pad 		[47]byte  // allignign user balance to 64 bytes 
-	Response  UserBalance /// 64
-	
+	UserId 	uint64
+	delta_available_balance  int64
+	delta_reserved_balance   int64
 }
 
 type BalanceResponseHeader struct {

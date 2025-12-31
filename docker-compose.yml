@@ -1,4 +1,4 @@
-
+version: '3.8'
 services:
   postgres:
     image: postgres:16
@@ -10,18 +10,11 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-
-  api-gateway:
-    build: .
-    ports:
-      - "1323:1323"
-    environment:
-      - GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
-      - GOOGLE_CLIENT_SECRET=your_google_secret
-    depends_on:
-      - postgres
-    volumes:
-      - .:/app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stock_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:
