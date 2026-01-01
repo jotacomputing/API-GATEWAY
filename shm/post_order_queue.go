@@ -21,10 +21,10 @@ type Order struct {
 	Symbol   uint32
 	// Then uint8s (1-byte aligned)
 	Side       uint8 // 0=buy, 1=sell
-	Status     uint8 // 0=pending, 1=filled, 2=rejected
 	Order_type uint8
+	Status     uint8 // 0=pending, 1=filled, 2=rejected
 	// Array of bytes last
-	_pad [5]byte
+	//_pad [5]byte
 }
 
 type TempOrder struct {
