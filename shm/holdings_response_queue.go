@@ -9,7 +9,7 @@ import (
 	"github.com/edsrzf/mmap-go"
 )
 
-const MAX_SYMBOLS = 100
+const MAX_SYMBOLS = 10
 
 type UserHoldings struct {
 	UserId             uint64
@@ -21,8 +21,8 @@ type UserHoldings struct {
 type HoldingResponse struct {
 	UserId   uint64
 	Symbol   uint32
-	delta_available_holdings  int32
-	delta_reserved_holdings   int32
+	Delta_available_holdings  int32
+	Delta_reserved_holdings   int32
 	_pad	 [4]byte
 }
 

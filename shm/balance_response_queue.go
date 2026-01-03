@@ -8,19 +8,19 @@ import (
 )
 
 type UserBalance struct{
-	 UserId 			uint64   // 8        
-     Available_balance  uint64
-     Reserved_balance   uint64
-     Total_traded_today uint64
-     Order_count_today	uint64
-	 _pad				[24]byte
+	UserId 			uint64   // 8        
+	Available_balance  uint64
+    Reserved_balance   uint64
+    Total_traded_today uint64
+    Order_count_today	uint64
+	_pad				[24]byte
 }
 // user balance 64 bytes 
 
 type BalanceResponse struct {
 	UserId 	uint64
-	delta_available_balance  int64
-	delta_reserved_balance   int64
+	Delta_available_balance  int64
+	Delta_reserved_balance   int64
 }
 
 type BalanceResponseHeader struct {

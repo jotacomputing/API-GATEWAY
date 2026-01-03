@@ -6,6 +6,7 @@ import (
 	ws "exchange/ws"
 	shm "exchange/shm"
 	hub "exchange/Hub"
+	balances "exchange/balances"
 	"fmt"
 	"os"
 	"os/signal"
@@ -56,7 +57,10 @@ func main() {
 
 	order_event_hub := hub.NewOrderEventHub()
 	go order_event_hub.Start()
-	wsServer := ws.NewServer(sm , order_event_hub, &shmmanager)	
+
+	cache := balances.NewBalanceHoldingCache()
+
+	wsServer := ws.NewServer(sm , order_event_hub, &shmmanager,cache)	
 	go wsServer.CreateServer()
 
 	

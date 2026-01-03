@@ -7,12 +7,13 @@ import (
 	symbolmanager "exchange/SymbolManager"
 	"exchange/db"
 	"fmt"
+	_ "io"
 	"log"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
-	_ "io"
+
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/websocket"
 
@@ -52,42 +53,77 @@ type Server struct {
 	symbol_manager_ptr   *symbolmanager.SymbolManager
 	order_events_hub_ptr *hub.OrderEventsHub
 	shm_manager_ptr      *shm.ShmManager
+	cache                *balances.BalanceHoldingCache
+	cacheGetBalanceCh    chan balances.GetBalanceReq
+	cacheGetHoldingsCh   chan balances.GetHoldingsReq
 }
 
 func NewServer(
 	symbo_manager_ptr *symbolmanager.SymbolManager,
-	order_events_hub_ptr *hub.OrderEventsHub, // for subscirbing unsibsicribing
+	order_events_hub_ptr *hub.OrderEventsHub,
 	shm_manager_ptr *shm.ShmManager,
+	cache *balances.BalanceHoldingCache,
 ) *Server {
 	return &Server{
 		symbol_manager_ptr:   symbo_manager_ptr,
 		order_events_hub_ptr: order_events_hub_ptr,
 		shm_manager_ptr:      shm_manager_ptr,
+		cache:                cache,
+		cacheGetBalanceCh:    make(chan balances.GetBalanceReq, 4096),
+		cacheGetHoldingsCh:   make(chan balances.GetHoldingsReq, 4096),
 	}
 }
 
 func (s *Server) GetBalanceHandler(c echo.Context) error {
 	userID := c.Get("user_id").(uint64)
 
-	snap := balances.GetCurrentSnapshot()
-	bal, ok := snap.Balances[userID]
-	if !ok {
-		bal = shm.UserBalance{UserId: userID} // default zero balance
+	reqCtx := c.Request().Context()
+
+	replyCh := make(chan shm.UserBalance, 1)
+
+	req := balances.GetBalanceReq{
+		UserID:  userID,
+		ReplyCh: replyCh,
+	}
+	//send it in reader channel
+	select {
+	case s.cacheGetBalanceCh <- req:
+	case <-reqCtx.Done():
+		return echo.NewHTTPError(http.StatusRequestTimeout, "request cancelled")
+	}
+	//wait for reply or context done
+	select {
+	case balance := <-replyCh:
+		return c.JSON(http.StatusOK, balance)
+	case <-reqCtx.Done():
+		return echo.NewHTTPError(http.StatusRequestTimeout, "request cancelled")
 	}
 
-	return c.JSON(http.StatusOK, bal)
 }
 
 func (s *Server) GetHoldingsHandler(c echo.Context) error {
 	userID := c.Get("user_id").(uint64)
 
-	snap := balances.GetCurrentSnapshot()
-	h, ok := snap.Holdings[userID]
-	if !ok {
-		h = shm.UserHoldings{UserId: userID} // default empty holdings
-	}
+	reqCtx := c.Request().Context()
 
-	return c.JSON(http.StatusOK, h)
+	replyCh := make(chan shm.UserHoldings, 1)
+	req := balances.GetHoldingsReq{
+		UserID:  userID,
+		ReplyCh: replyCh,
+	}
+	//send it in reader channel
+	select {
+	case s.cacheGetHoldingsCh <- req:
+	case <-reqCtx.Done():
+		return echo.NewHTTPError(http.StatusRequestTimeout, "request cancelled")
+	}
+	//wait for reply or context done
+	select {
+	case holdings := <-replyCh:
+		return c.JSON(http.StatusOK, holdings)
+	case <-reqCtx.Done():
+		return echo.NewHTTPError(http.StatusRequestTimeout, "request cancelled")
+	}
 }
 
 func (s *Server) CancelOrderHandler(c echo.Context) error {
@@ -153,12 +189,12 @@ func (s *Server) PostOrderHandler(c echo.Context) error {
 	}
 
 	go func(order shm.Order) {
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-    defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
-    if err := db.RecordPendingOrder(ctx, order); err != nil {
-        log.Printf("RecordPendingOrder failed: %v", err)
-    }
+		if err := db.RecordPendingOrder(ctx, order); err != nil {
+			log.Printf("RecordPendingOrder failed: %v", err)
+		}
 	}(order)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -376,17 +412,16 @@ func (s *Server) googleCallback(c echo.Context) error {
 		Name  string `json:"name"`
 	}
 	decoder := json.NewDecoder(resp.Body)
-	if err := decoder.Decode(&userinfo);
-	err != nil {
+	if err := decoder.Decode(&userinfo); err != nil {
 		return c.JSON(500, map[string]string{"error": "Decode userinfo failed"})
 	}
 
 	// Find or create user - use REAL Google user ID
-	if(s.shm_manager_ptr==nil){
+	if s.shm_manager_ptr == nil {
 		log.Println("SHM MANAGER PTR IS NIL IN GOOGLE CALLBACK")
 	}
 
-	user, err := db.FindOrCreateOAuthUser(ctx, "google", userinfo.ID, userinfo.Email, userinfo.Name,s.shm_manager_ptr)
+	user, err := db.FindOrCreateOAuthUser(ctx, "google", userinfo.ID, userinfo.Email, userinfo.Name, s.shm_manager_ptr)
 	if err != nil {
 		return c.JSON(500, map[string]string{"error": "User creation failed: " + err.Error()})
 	}
@@ -405,9 +440,9 @@ func (s *Server) googleCallback(c echo.Context) error {
 	redirectURL := "http://localhost:3000/dashboard?token=" + jwtString + "&user_id=" + strconv.FormatInt(user.ID, 10)
 	return c.Redirect(http.StatusTemporaryRedirect, redirectURL) */
 	return c.JSON(http.StatusOK, map[string]any{
-    "token":   jwtString,
-    "user_id": strconv.FormatUint(uint64(user.ID), 10),
-    "email":   user.Email, // keep as pointer if you want
+		"token":   jwtString,
+		"user_id": strconv.FormatUint(uint64(user.ID), 10),
+		"email":   user.Email, // keep as pointer if you want
 	})
 }
 
@@ -435,31 +470,34 @@ func (s *Server) CreateServer() {
 	if err := db.InitDB("postgres://stock_user:stock_pass@localhost:5432/stock_exchange?sslmode=disable"); err != nil {
 		log.Fatalf("DB init failed: %v", err)
 	}
-	balances.InitState()
+	// start balance polling go routines
+	ctx := context.Background()
 
-	//go balances.PollBalanceResponses(s.shm_manager_ptr.Balance_Response_queue)
-	//go balances.PollHoldingResponses(s.shm_manager_ptr.Holding_Response_queue)
-	//go balances.StateUpdater()
+	go s.cache.Updater()
+	go s.cache.RunReader(ctx, s.cacheGetBalanceCh, s.cacheGetHoldingsCh)
+
+	go balances.PollBalanceResponses(s.shm_manager_ptr.Balance_Response_queue)
+	go balances.PollHoldingResponses(s.shm_manager_ptr.Holding_Response_queue)
 
 	e := echo.New()
 
 	// CORS + Middleware
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"http://localhost:3000", "http://127.0.0.1:3000","http://localhost:1323"},
+		AllowOrigins: []string{"http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:1323"},
 		AllowMethods: []string{echo.GET, echo.POST, echo.DELETE},
 		AllowHeaders: []string{echo.HeaderAuthorization, echo.HeaderContentType},
 	}))
 	e.Use(middleware.RequestLogger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.RecoverWithConfig(middleware.RecoverConfig{
-    DisablePrintStack: false,  // ⭐ SHOW FULL STACK TRACE
+		DisablePrintStack: false, // ⭐ SHOW FULL STACK TRACE
 	}))
 
 	e.GET("/auth/google", googleAuthRedirect)
 	//e.GET("/auth/github", githubAuthRedirect)
 
 	// OAuth Callbacks - Exchange code → JWT
-	e.GET("/auth/google/callback",s.googleCallback)
+	e.GET("/auth/google/callback", s.googleCallback)
 	//e.GET("/auth/github/callback", githubCallback)
 
 	api := e.Group("/api")
