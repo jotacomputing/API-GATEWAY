@@ -69,14 +69,20 @@ func (c *BalanceHoldingCache) applyBalanceUpdate(br shm.BalanceResponse) {
 
 func (c *BalanceHoldingCache) applyHoldingUpdate(hr shm.HoldingResponse) {
 	//first check if user holdings exists
+	if hr.Symbol >= MAX_SYMBOLS {
+		return
+	}
+
 	holdings, exists := c.holdings[hr.UserId]
 	if !exists {
 		// initialize new holdings with default qty for each 10 symbols ASSIGN DEFAULT_HOLDING_QTY
 		holdings = &shm.UserHoldings{
 			UserId: hr.UserId,
-			AvailableHoldings: [MAX_SYMBOLS]uint32{DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY, DEFAULT_HOLDING_QTY},
-			ReservedHoldings:  [MAX_SYMBOLS]uint32{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 		}
+		for i := uint32(0); i < MAX_SYMBOLS; i++ {
+			holdings.AvailableHoldings[i] = DEFAULT_HOLDING_QTY
+		}
+		// store back
 		c.holdings[hr.UserId] = holdings
 	}
 	// apply deltas

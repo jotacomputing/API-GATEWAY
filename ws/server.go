@@ -13,7 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
+	qdb "exchange/questdb"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/websocket"
 
@@ -72,6 +72,51 @@ func NewServer(
 		cacheGetBalanceCh:    make(chan balances.GetBalanceReq, 4096),
 		cacheGetHoldingsCh:   make(chan balances.GetHoldingsReq, 4096),
 	}
+}
+
+func (s *Server) GetRecentTradesHandler(c echo.Context) error {
+    symbol := c.QueryParam("symbol")
+    if symbol == "" {
+        return c.JSON(400, map[string]string{"error": "symbol is required"})
+    }
+
+    limit := 20
+    if v := c.QueryParam("limit"); v != "" {
+        if parsed, err := strconv.Atoi(v); err == nil {
+            limit = parsed
+        } else {
+            return c.JSON(400, map[string]string{"error": "invalid limit"})
+        }
+    }
+
+    trades, err := qdb.GetRecentTrades(c.Request().Context(), symbol, limit)
+    if err != nil {
+        return c.JSON(500, map[string]string{"error": err.Error()})
+    }
+
+    return c.JSON(200, trades)
+}
+func (s *Server) GetRecentSnapshotsHandler(c echo.Context) error {
+    symbol := c.QueryParam("symbol")
+    if symbol == "" {
+        return c.JSON(400, map[string]string{"error": "symbol is required"})
+    }
+
+    limit := 20
+    if v := c.QueryParam("limit"); v != "" {
+        if parsed, err := strconv.Atoi(v); err == nil {
+            limit = parsed
+        } else {
+            return c.JSON(400, map[string]string{"error": "invalid limit"})
+        }
+    }
+
+    snaps, err := qdb.GetRecentOrderBookSnapshots(c.Request().Context(), symbol, limit)
+    if err != nil {
+        return c.JSON(500, map[string]string{"error": err.Error()})
+    }
+
+    return c.JSON(200, snaps)
 }
 
 func (s *Server) GetBalanceHandler(c echo.Context) error {
@@ -470,6 +515,10 @@ func (s *Server) CreateServer() {
 	if err := db.InitDB("postgres://stock_user:stock_pass@localhost:5432/stock_exchange?sslmode=disable"); err != nil {
 		log.Fatalf("DB init failed: %v", err)
 	}
+	// init questdb
+	if err := qdb.InitQuestDB("postgresql://admin:quest@localhost:8812/qdb?sslmode=disable"); err != nil {
+        log.Fatalf("QuestDB init failed: %v", err)
+    }
 	// start balance polling go routines
 	ctx := context.Background()
 
@@ -508,6 +557,8 @@ func (s *Server) CreateServer() {
 	api.GET("/holdings", s.GetHoldingsHandler)
 	api.DELETE("/cancel", s.CancelOrderHandler)
 	api.GET("/orders", s.GetUserOrdersHandler)
+	api.GET("/bootstrap/trades", s.GetRecentTradesHandler)
+	api.GET("/bootstrap/snapshots", s.GetRecentSnapshotsHandler)
 
 	ws := e.Group("/ws")
 	ws.Use(jwtMiddleware())
@@ -525,7 +576,8 @@ func (s *Server) CreateServer() {
 	<-quit
 	log.Println("Shutting down...")
 	db.Close()
+	qdb.CloseQuestDB()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	e.Shutdown(ctx) // Remove defer
+	e.Shutdown(ctx) 
 	cancel()
 }

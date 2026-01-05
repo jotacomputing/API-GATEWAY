@@ -15,11 +15,38 @@ import (
 
 var pool *pgxpool.Pool
 
+// Order status constants
+const (
+	OrderStatusPending  int16 = 0
+	OrderStatusAccepted int16 = 1
+	OrderStatusPartial  int16 = 2
+	OrderStatusFilled   int16 = 3
+	OrderStatusRejected int16 = 4
+	OrderStatusCanceled int16 = 5
+)
+
 type User struct {
 	ID        int64     `json:"id"`
 	Email     *string   `json:"email,omitempty"`
 	Username  string    `json:"username"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+func mapEventKindToStatus(eventKind uint32) (int16, string) {
+	switch eventKind {
+	case 0: // accepted
+		return OrderStatusAccepted, ""
+	case 1: // partial
+		return OrderStatusPartial, ""
+	case 2: // full fill
+		return OrderStatusFilled, ""
+	case 3: // rejected
+		return OrderStatusRejected, "rejected" // or decode ErrorCode → string
+	case 4: // canceled
+		return OrderStatusCanceled, "canceled"
+	default:
+		return OrderStatusPending, "unknown_event"
+	}
 }
 
 // InitDB creates connection pool + tables (called ONCE at startup)
@@ -157,7 +184,7 @@ func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email,
 			query.QueryId = 0
 			query.QueryType = 2
 			query.UserId = uint64(user.ID)
-			shm_manager_ptr.Query_queue.Enqueue(query)  // Safe - nil check
+			shm_manager_ptr.Query_queue.Enqueue(query) // Safe - nil check
 		}
 		// Link OAuth account
 		_, err = tx.Exec(ctx, `
@@ -221,7 +248,7 @@ func RecordCancelRequest(ctx context.Context, userID uint64, orderID uint64, sym
 type Order struct {
 	ID           int64     `json:"id"`
 	OrderID      uint64    `json:"order_id"`
-	Symbol       int32     `json:"symbol"`	
+	Symbol       int32     `json:"symbol"`
 	Side         int16     `json:"side"`
 	OrderType    int16     `json:"order_type"`
 	Status       int16     `json:"status"`
@@ -266,6 +293,31 @@ func GetUserOrders(ctx context.Context, userID uint64, limit int32, offset int32
 	}
 
 	return orders, rows.Err()
+}
+
+// Update order row based on engine event.
+func ApplyOrderEvent(ctx context.Context, ev shm.OrderEvent) error {
+	if pool == nil {
+		return fmt.Errorf("db pool not initialized")
+	}
+
+	status, reason := mapEventKindToStatus(ev.EventKind)
+
+	filledQty := ev.FilledQty
+
+	_, err := pool.Exec(ctx, `
+		UPDATE orders
+		SET status = $1,
+		    filled_qty = $2,
+		    reject_reason = CASE WHEN $3 = '' THEN reject_reason ELSE $3 END,
+		    updated_at = now()
+		WHERE order_id = $4
+		  AND user_id = $5
+		  AND symbol  = $6
+	`, status, float64(filledQty), reason,
+		ev.OrderId, ev.UserId, int32(ev.Symbol),
+	)
+	return err
 }
 
 // Close pool on shutdown
