@@ -7,6 +7,8 @@ import (
 	shm "exchange/shm"
 	hub "exchange/Hub"
 	balances "exchange/balances"
+	"exchange/db"
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -65,7 +67,24 @@ func main() {
 
 	
 	shmmanager.BrodCaster = order_event_hub
-	go shmmanager.PollOrderEvents()
+
+	eventsCh := make(chan shm.OrderEvent, 1024)
+
+	go shmmanager.PollOrderEvents(eventsCh)
+
+	go func() {
+		for ev := range eventsCh {
+			// 1) broadcast
+			order_event_hub.BrodCast(ev)
+			// 2) db update
+			go func(ev shm.OrderEvent) {
+				ctx := context.Background()
+				if err := db.ApplyOrderEvent(ctx, ev); err != nil {
+					fmt.Println("failed to apply order event:", err)
+				}
+			}(ev)
+		}
+	}()
 
 
 	sigChan := make(chan os.Signal, 1)

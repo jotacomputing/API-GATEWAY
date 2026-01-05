@@ -37,28 +37,21 @@ func GetShmManager(Balance_Response_queue *BalanceResponseQueue,
 
 // function to launch go routines to poll the order events and the query response queue
 
-func (m *ShmManager) PollOrderEvents() {
+func (m *ShmManager) PollOrderEvents(out chan<- OrderEvent) {
 	fmt.Println("startigng poller")
 	for {
 
 		event, err := m.Order_Events_queue.Dequeue()
 
 		if err != nil {
-			return
+			fmt.Println("error dequeuing order event:", err)
 		}
 		if event == nil {
 			continue
 		}
 		fmt.Println(event)
+		// push the event to the out channel
+		out <- *event
 
-		m.BrodCaster.BrodCast(*event)
-		//go routines for each event to write in db
-
-		/* go func(event *OrderEvent) {
-			ctx := context.Background() // or a shared root context
-			if err := db.ApplyOrderEvent(ctx, event); err != nil {
-				fmt.Println("failed to apply order event:", err)
-			}
-		}(event) */
 	}
 }
