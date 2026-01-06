@@ -6,6 +6,7 @@ import (
 	hub "exchange/Hub"
 	symbolmanager "exchange/SymbolManager"
 	"exchange/db"
+	qdb "exchange/questdb"
 	"fmt"
 	_ "io"
 	"log"
@@ -13,7 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	qdb "exchange/questdb"
+
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/websocket"
 
@@ -38,7 +39,10 @@ var upgrader = websocket.Upgrader{
 		origin := r.Header.Get("Origin")
 		return origin == "http://localhost:3000" ||
 			origin == "http://127.0.0.1:3000" ||
-			origin == "http://localhost:1323"
+			origin == "http://localhost:1323" ||
+			origin == "http://stock-ex.aniketnegi.com:3000" ||
+			origin == "http://stock-ex.aniketnegi.com" ||
+			origin == "http://stock-ex.aniketnegi.com:1323"
 	},
 }
 var googleOauthConfig *oauth2.Config
@@ -75,48 +79,48 @@ func NewServer(
 }
 
 func (s *Server) GetRecentTradesHandler(c echo.Context) error {
-    symbol := c.QueryParam("symbol")
-    if symbol == "" {
-        return c.JSON(400, map[string]string{"error": "symbol is required"})
-    }
+	symbol := c.QueryParam("symbol")
+	if symbol == "" {
+		return c.JSON(400, map[string]string{"error": "symbol is required"})
+	}
 
-    limit := 20
-    if v := c.QueryParam("limit"); v != "" {
-        if parsed, err := strconv.Atoi(v); err == nil {
-            limit = parsed
-        } else {
-            return c.JSON(400, map[string]string{"error": "invalid limit"})
-        }
-    }
+	limit := 20
+	if v := c.QueryParam("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			limit = parsed
+		} else {
+			return c.JSON(400, map[string]string{"error": "invalid limit"})
+		}
+	}
 
-    trades, err := qdb.GetRecentTrades(c.Request().Context(), symbol, limit)
-    if err != nil {
-        return c.JSON(500, map[string]string{"error": err.Error()})
-    }
+	trades, err := qdb.GetRecentTrades(c.Request().Context(), symbol, limit)
+	if err != nil {
+		return c.JSON(500, map[string]string{"error": err.Error()})
+	}
 
-    return c.JSON(200, trades)
+	return c.JSON(200, trades)
 }
 func (s *Server) GetRecentSnapshotsHandler(c echo.Context) error {
-    symbol := c.QueryParam("symbol")
-    if symbol == "" {
-        return c.JSON(400, map[string]string{"error": "symbol is required"})
-    }
+	symbol := c.QueryParam("symbol")
+	if symbol == "" {
+		return c.JSON(400, map[string]string{"error": "symbol is required"})
+	}
 
-    limit := 20
-    if v := c.QueryParam("limit"); v != "" {
-        if parsed, err := strconv.Atoi(v); err == nil {
-            limit = parsed
-        } else {
-            return c.JSON(400, map[string]string{"error": "invalid limit"})
-        }
-    }
+	limit := 20
+	if v := c.QueryParam("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			limit = parsed
+		} else {
+			return c.JSON(400, map[string]string{"error": "invalid limit"})
+		}
+	}
 
-    snaps, err := qdb.GetRecentOrderBookSnapshots(c.Request().Context(), symbol, limit)
-    if err != nil {
-        return c.JSON(500, map[string]string{"error": err.Error()})
-    }
+	snaps, err := qdb.GetRecentOrderBookSnapshots(c.Request().Context(), symbol, limit)
+	if err != nil {
+		return c.JSON(500, map[string]string{"error": err.Error()})
+	}
 
-    return c.JSON(200, snaps)
+	return c.JSON(200, snaps)
 }
 
 func (s *Server) GetBalanceHandler(c echo.Context) error {
@@ -481,14 +485,14 @@ func (s *Server) googleCallback(c echo.Context) error {
 		return c.JSON(500, map[string]string{"error": "JWT signing failed"})
 	}
 
-	/* // Redirect to frontend with JWT
-	redirectURL := "http://localhost:3000/dashboard?token=" + jwtString + "&user_id=" + strconv.FormatInt(user.ID, 10)
-	return c.Redirect(http.StatusTemporaryRedirect, redirectURL) */
-	return c.JSON(http.StatusOK, map[string]any{
-		"token":   jwtString,
-		"user_id": strconv.FormatUint(uint64(user.ID), 10),
-		"email":   user.Email, // keep as pointer if you want
-	})
+	// Redirect to frontend with JWT
+	redirectURL := "http://stock-ex.aniketnegi.com:3000/dashboard?token=" + jwtString + "&user_id=" + strconv.FormatInt(user.ID, 10)
+	return c.Redirect(http.StatusTemporaryRedirect, redirectURL)
+	/* return c.JSON(http.StatusOK, map[string]any{
+	"token":   jwtString,
+	"user_id": strconv.FormatUint(uint64(user.ID), 10),
+	"email":   user.Email, // keep as pointer if you want }*/
+
 }
 
 func (s *Server) CreateServer() {
@@ -502,7 +506,7 @@ func (s *Server) CreateServer() {
 	googleOauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-		RedirectURL:  "http://localhost:1323/auth/google/callback",
+		RedirectURL:  "http://stock-ex.aniketnegi.com:1323/auth/google/callback",
 		Scopes:       []string{"openid", "email", "profile"},
 		Endpoint:     google.Endpoint,
 	}
@@ -517,8 +521,8 @@ func (s *Server) CreateServer() {
 	}
 	// init questdb
 	if err := qdb.InitQuestDB("postgresql://admin:quest@localhost:8812/qdb?sslmode=disable"); err != nil {
-        log.Fatalf("QuestDB init failed: %v", err)
-    }
+		log.Fatalf("QuestDB init failed: %v", err)
+	}
 	// start balance polling go routines
 	ctx := context.Background()
 
@@ -532,7 +536,7 @@ func (s *Server) CreateServer() {
 
 	// CORS + Middleware
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:1323"},
+		AllowOrigins: []string{"http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:1323", "http://stock-ex.aniketnegi.com:3000"},
 		AllowMethods: []string{echo.GET, echo.POST, echo.DELETE},
 		AllowHeaders: []string{echo.HeaderAuthorization, echo.HeaderContentType},
 	}))
@@ -578,6 +582,6 @@ func (s *Server) CreateServer() {
 	db.Close()
 	qdb.CloseQuestDB()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	e.Shutdown(ctx) 
+	e.Shutdown(ctx)
 	cancel()
 }
