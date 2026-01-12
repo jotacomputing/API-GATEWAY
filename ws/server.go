@@ -1,7 +1,9 @@
 package ws
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	contracts "exchange/Contracts"
 	hub "exchange/Hub"
 	symbolmanager "exchange/SymbolManager"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/joho/godotenv"
 	"golang.org/x/oauth2"
@@ -514,6 +517,88 @@ func (s *Server) googleCallback(c echo.Context) error {
 	"email":   user.Email, // keep as pointer if you want }*/
 
 }
+func adminOnlyMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			v := c.Get("user_id")
+			userID, ok := v.(uint64)
+			if !ok {
+				return echo.ErrUnauthorized
+			}
+
+			ctx := c.Request().Context()
+			u, err := db.GetUserByID(ctx, int64(userID))
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
+					return echo.ErrUnauthorized 
+				}
+				log.Printf("admin check failed for user %d: %v", userID, err) // Log for debugging
+				return echo.NewHTTPError(http.StatusInternalServerError, "user lookup failed")
+			}
+
+			if !u.IsAdmin {
+				return echo.NewHTTPError(http.StatusForbidden, "admin access required")
+			}
+
+			return next(c)
+		}
+	}
+}
+
+//admin handlers
+func (s *Server) PromoteUserToAdminHandler(c echo.Context) error {
+    targetUserIDStr := c.Param("userID")
+    targetUserID, err := strconv.ParseInt(targetUserIDStr, 10, 64)
+    if err != nil {
+        return echo.NewHTTPError(http.StatusBadRequest, "invalid user ID")
+    }
+
+    ctx := c.Request().Context()
+    if err := db.SetUserAdmin(ctx, targetUserID, true); err != nil {
+        return echo.NewHTTPError(http.StatusInternalServerError, "failed to promote user")
+    }
+
+    return c.JSON(http.StatusOK, map[string]interface{}{
+        "message":    "User promoted to admin",
+        "user_id":    targetUserID,
+        "is_admin":   true,
+    })
+}
+
+func (s *Server) DemoteUserToAdminHandler(c echo.Context) error {
+    targetUserIDStr := c.Param("userID")
+    targetUserID, err := strconv.ParseInt(targetUserIDStr, 10, 64)
+    if err != nil {
+        return echo.NewHTTPError(http.StatusBadRequest, "invalid user ID")
+    }
+
+    ctx := c.Request().Context()
+    if err := db.SetUserAdmin(ctx, targetUserID, false); err != nil {
+        return echo.NewHTTPError(http.StatusInternalServerError, "failed to demote user")
+    }
+
+    return c.JSON(http.StatusOK, map[string]interface{}{
+        "message":    "User demoted to admin",
+        "user_id":    targetUserID,
+        "is_admin":   false,
+    })
+}
+
+func (s *Server) ListUsersHandler(c echo.Context) error {
+    limit := int32(50)
+    offset := int32(0)
+    if v := c.QueryParam("limit"); v != "" {
+        if parsed, err := strconv.Atoi(v); err == nil {
+            limit = int32(parsed)
+        }
+    }
+    users, err := db.ListUsers(c.Request().Context(), limit, offset)
+    if err != nil {
+        return echo.NewHTTPError(http.StatusInternalServerError, "failed to list users")
+    }
+    return c.JSON(http.StatusOK, users)
+}
+
 
 func (s *Server) CreateServer() {
 	fmt.Println("BOOTING SERVER...")
@@ -584,6 +669,13 @@ func (s *Server) CreateServer() {
 	api.GET("/orders", s.GetUserOrdersHandler)
 	api.GET("/bootstrap/trades", s.GetRecentTradesHandler)
 	api.GET("/bootstrap/snapshots", s.GetRecentSnapshotsHandler)
+
+	admin := api.Group("/admin")
+	admin.Use(adminOnlyMiddleware())
+	// admin routes go here
+	admin.POST("/users/promote/:userID", s.PromoteUserToAdminHandler)
+	admin.POST("/users/demote/:userID", s.DemoteUserToAdminHandler)
+	admin.GET("/users", s.ListUsersHandler)  // For selecting who to promote
 
 	ws := e.Group("/ws")
 	ws.Use(jwtMiddleware())

@@ -29,6 +29,7 @@ type User struct {
 	ID        int64     `json:"id"`
 	Email     *string   `json:"email,omitempty"`
 	Username  string    `json:"username"`
+	IsAdmin   bool      `json:"is_admin"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -87,6 +88,7 @@ func InitDB(dsn string) error {
             id BIGSERIAL PRIMARY KEY,
             email VARCHAR(255),
             username VARCHAR(64),
+            is_admin BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TIMESTAMPTZ DEFAULT now()
         );
 
@@ -161,32 +163,36 @@ func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email,
 
 	var user User
 	err = tx.QueryRow(ctx, `
-        SELECT u.id, u.email, u.username, u.created_at
+        SELECT u.id, u.email, u.username, u.is_admin, u.created_at
         FROM users u 
         JOIN oauth_accounts oa ON oa.user_id = u.id 
         WHERE oa.provider = $1 AND oa.provider_user_id = $2
         FOR UPDATE OF u
-    `, provider, providerUserID).Scan(&user.ID, &user.Email, &user.Username, &user.CreatedAt)
+    `, provider, providerUserID).Scan(
+		&user.ID, &user.Email, &user.Username, &user.IsAdmin, &user.CreatedAt,
+	)
 
 	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
-		// Create new user atomically
+
 		err = tx.QueryRow(ctx, `
             INSERT INTO users (email, username)
             VALUES ($1, $2)
-            RETURNING id, email, username, created_at
-        `, email, username).Scan(&user.ID, &user.Email, &user.Username, &user.CreatedAt)
+            RETURNING id, email, username, is_admin, created_at
+        `, email, username).Scan(
+			&user.ID, &user.Email, &user.Username, &user.IsAdmin, &user.CreatedAt,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("create user: %w", err)
 		}
 
+		// ... rest unchanged (shm query, oauth_accounts, balance insert)
 		if shm_manager_ptr != nil && shm_manager_ptr.Query_queue != nil {
 			var query shm.Query
 			query.QueryId = 0
 			query.QueryType = 2
 			query.UserId = uint64(user.ID)
-			shm_manager_ptr.Query_queue.Enqueue(query) // Safe - nil check
+			shm_manager_ptr.Query_queue.Enqueue(query)
 		}
-		// Link OAuth account
 		_, err = tx.Exec(ctx, `
             INSERT INTO oauth_accounts (user_id, provider, provider_user_id)
             VALUES ($1, $2, $3)
@@ -194,8 +200,6 @@ func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email,
 		if err != nil {
 			return nil, fmt.Errorf("link oauth: %w", err)
 		}
-
-		// Auto-create balance
 		_, err = tx.Exec(ctx, `
             INSERT INTO user_balances (user_id, balance) 
             VALUES ($1, 0) ON CONFLICT DO NOTHING
@@ -213,6 +217,23 @@ func FindOrCreateOAuthUser(ctx context.Context, provider, providerUserID, email,
 
 	return &user, nil
 }
+
+func GetUserByID(ctx context.Context, id int64) (*User, error) {
+    var u User
+    err := pool.QueryRow(ctx, `
+        SELECT id, email, username, is_admin, created_at
+        FROM users
+        WHERE id = $1
+    `, id).Scan(&u.ID, &u.Email, &u.Username, &u.IsAdmin, &u.CreatedAt)
+    if errors.Is(err, pgx.ErrNoRows) {
+        return nil, sql.ErrNoRows
+    }
+    if err != nil {
+        return nil, err
+    }
+    return &u, nil
+}
+
 
 // 1. Record incoming order (status=0, pending)
 func RecordPendingOrder(ctx context.Context, order shm.Order) error {
@@ -319,6 +340,43 @@ func ApplyOrderEvent(ctx context.Context, ev shm.OrderEvent) error {
 	)
 	return err
 }
+
+
+
+//admin functions 
+
+func SetUserAdmin(ctx context.Context, userID int64, isAdmin bool) error {
+    _, err := pool.Exec(ctx, `
+        UPDATE users 
+        SET is_admin = $1 
+        WHERE id = $2
+    `, isAdmin, userID)
+    return err
+}
+
+func ListUsers(ctx context.Context, limit, offset int32) ([]User, error) {
+    rows, err := pool.Query(ctx, `
+        SELECT id, email, username, is_admin, created_at
+        FROM users 
+        ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2
+    `, limit, offset)
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+
+    var users []User
+    for rows.Next() {
+        var u User
+        if err := rows.Scan(&u.ID, &u.Email, &u.Username, &u.IsAdmin, &u.CreatedAt); err != nil {
+            return nil, err
+        }
+        users = append(users, u)
+    }
+    return users, nil
+}
+
 
 // Close pool on shutdown
 func Close() {
