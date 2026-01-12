@@ -60,6 +60,7 @@ type Server struct {
 	cache                *balances.BalanceHoldingCache
 	cacheGetBalanceCh    chan balances.GetBalanceReq
 	cacheGetHoldingsCh   chan balances.GetHoldingsReq
+	orderBuffer          chan shm.Order
 }
 
 func NewServer(
@@ -75,6 +76,20 @@ func NewServer(
 		cache:                cache,
 		cacheGetBalanceCh:    make(chan balances.GetBalanceReq, 4096),
 		cacheGetHoldingsCh:   make(chan balances.GetHoldingsReq, 4096),
+		//we need to decide its capacity later
+		orderBuffer: make(chan shm.Order, 16384),
+	}
+}
+
+// poller go routine to read from order buffer and enqueue into shm
+func (s *Server) OrderBufferPoller() {
+	for {
+		order := <-s.orderBuffer
+		//enqueue into shm
+		if err := s.shm_manager_ptr.Post_Order_queue.Enqueue(order); err != nil {
+			log.Println("Failed to enqueue order from buffer:", err)
+
+		}
 	}
 }
 
@@ -232,10 +247,15 @@ func (s *Server) PostOrderHandler(c echo.Context) error {
 	order.Order_type = tempOrder.Order_type
 	order.Status = 0 // pending
 
-	// Enqueue the order
-	if err := s.shm_manager_ptr.Post_Order_queue.Enqueue(order); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to enqueue order")
+	// Enqueue the order into order buffer
+	select {
+	case s.orderBuffer <- order:
+		// successfully enqueued
+	default:
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "Order buffer full, try again later")
 	}
+
+	// Asynchronously record the pending order in the database
 
 	go func(order shm.Order) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -383,7 +403,7 @@ func (s *Server) wsHandlerOrderEvents(c echo.Context) error {
 // JWT Middleware
 var jwtSecret = []byte("your-super-secret-jwt-key-change-in-prod") // Or load from env
 
-// JWT Middleware - Replaces echoserver.TokenHandler()
+// JWT Middleware
 func jwtMiddleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -524,6 +544,7 @@ func (s *Server) CreateServer() {
 		log.Fatalf("QuestDB init failed: %v", err)
 	}
 	// start balance polling go routines
+	go s.OrderBufferPoller()
 	ctx := context.Background()
 
 	go s.cache.Updater()
