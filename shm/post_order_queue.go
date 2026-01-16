@@ -28,7 +28,6 @@ type Order struct {
 }
 
 type TempOrder struct {
-	OrderID    uint64 `json:"order_id"`
 	Price      uint64 `json:"price"`
 	Timestamp  uint64 `json:"timestamp"`
 	Quantity   uint32 `json:"quantity"`

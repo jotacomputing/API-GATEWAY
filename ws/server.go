@@ -16,7 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
+	"exchange/utils"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
@@ -64,6 +64,7 @@ type Server struct {
 	cacheGetBalanceCh    chan balances.GetBalanceReq
 	cacheGetHoldingsCh   chan balances.GetHoldingsReq
 	orderBuffer          chan shm.Order
+	cancelBuffer		 chan shm.OrderToBeCanceled
 }
 
 func NewServer(
@@ -80,7 +81,8 @@ func NewServer(
 		cacheGetBalanceCh:    make(chan balances.GetBalanceReq, 4096),
 		cacheGetHoldingsCh:   make(chan balances.GetHoldingsReq, 4096),
 		//we need to decide its capacity later
-		orderBuffer: make(chan shm.Order, 16384),
+		orderBuffer: make(chan shm.Order, 32768),
+		cancelBuffer: make(chan shm.OrderToBeCanceled, 32768),
 	}
 }
 
@@ -92,6 +94,16 @@ func (s *Server) OrderBufferPoller() {
 		if err := s.shm_manager_ptr.Post_Order_queue.Enqueue(order); err != nil {
 			log.Println("Failed to enqueue order from buffer:", err)
 
+		}
+	}
+}
+
+func (s *Server) CancelBufferPoller() {
+	for {
+		order := <-s.cancelBuffer
+		//enqueue into shm
+		if err := s.shm_manager_ptr.CancelOrderQueue.Enqueue(order); err != nil {
+			log.Println("Failed to enqueue cancel order from buffer:", err)
 		}
 	}
 }
@@ -196,13 +208,6 @@ func (s *Server) GetHoldingsHandler(c echo.Context) error {
 func (s *Server) CancelOrderHandler(c echo.Context) error {
 	userID := c.Get("user_id").(uint64)
 
-	// Get orderId from URL param
-	/* orderIDStr := c.Param("orderId")
-	orderID, err := strconv.ParseUint(orderIDStr, 10, 64)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "Invalid order ID format")
-	} */
-
 	var tempOrderToBeCanceled shm.TempOrderToBeCanceled
 	if err := c.Bind(&tempOrderToBeCanceled); err != nil {
 		return c.JSON(400, map[string]string{"error": "Invalid request body"})
@@ -213,10 +218,16 @@ func (s *Server) CancelOrderHandler(c echo.Context) error {
 	cancelOrder.Symbol = tempOrderToBeCanceled.Symbol
 	cancelOrder.UserId = userID
 
-	// Enqueue the cancel order request
-	if err := s.shm_manager_ptr.CancelOrderQueue.Enqueue(cancelOrder); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to enqueue cancel order request")
+	//enqueue into cancel order shm queue
+	select {
+	case s.cancelBuffer <- cancelOrder:
+	default:
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "Cancel order buffer full, try again later")
 	}
+	
+	/* if err := s.shm_manager_ptr.CancelOrderQueue.Enqueue(cancelOrder); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to enqueue cancel order request")
+	} */
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"status":   "Cancel order request placed successfully",
@@ -227,6 +238,7 @@ func (s *Server) CancelOrderHandler(c echo.Context) error {
 
 func (s *Server) PostOrderHandler(c echo.Context) error {
 	userID := c.Get("user_id").(uint64)
+	///order id will be generated here
 
 	var tempOrder shm.TempOrder
 	if err := c.Bind(&tempOrder); err != nil {
@@ -238,9 +250,9 @@ func (s *Server) PostOrderHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
-	// Create order with AUTHENTICATED user_id (secure - from token, not request!)
+	
 	var order shm.Order
-	order.OrderID = tempOrder.OrderID
+	order.OrderID = utils.NextOrderID()
 	order.Price = tempOrder.Price
 	order.Timestamp = tempOrder.Timestamp
 	order.UserId = userID
@@ -253,7 +265,6 @@ func (s *Server) PostOrderHandler(c echo.Context) error {
 	// Enqueue the order into order buffer
 	select {
 	case s.orderBuffer <- order:
-		// successfully enqueued
 	default:
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "Order buffer full, try again later")
 	}
@@ -530,7 +541,7 @@ func adminOnlyMiddleware() echo.MiddlewareFunc {
 			u, err := db.GetUserByID(ctx, int64(userID))
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
-					return echo.ErrUnauthorized 
+					return echo.ErrUnauthorized
 				}
 				log.Printf("admin check failed for user %d: %v", userID, err) // Log for debugging
 				return echo.NewHTTPError(http.StatusInternalServerError, "user lookup failed")
@@ -545,60 +556,59 @@ func adminOnlyMiddleware() echo.MiddlewareFunc {
 	}
 }
 
-//admin handlers
+// admin handlers
 func (s *Server) PromoteUserToAdminHandler(c echo.Context) error {
-    targetUserIDStr := c.Param("userID")
-    targetUserID, err := strconv.ParseInt(targetUserIDStr, 10, 64)
-    if err != nil {
-        return echo.NewHTTPError(http.StatusBadRequest, "invalid user ID")
-    }
+	targetUserIDStr := c.Param("userID")
+	targetUserID, err := strconv.ParseInt(targetUserIDStr, 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid user ID")
+	}
 
-    ctx := c.Request().Context()
-    if err := db.SetUserAdmin(ctx, targetUserID, true); err != nil {
-        return echo.NewHTTPError(http.StatusInternalServerError, "failed to promote user")
-    }
+	ctx := c.Request().Context()
+	if err := db.SetUserAdmin(ctx, targetUserID, true); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to promote user")
+	}
 
-    return c.JSON(http.StatusOK, map[string]interface{}{
-        "message":    "User promoted to admin",
-        "user_id":    targetUserID,
-        "is_admin":   true,
-    })
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":  "User promoted to admin",
+		"user_id":  targetUserID,
+		"is_admin": true,
+	})
 }
 
 func (s *Server) DemoteUserToAdminHandler(c echo.Context) error {
-    targetUserIDStr := c.Param("userID")
-    targetUserID, err := strconv.ParseInt(targetUserIDStr, 10, 64)
-    if err != nil {
-        return echo.NewHTTPError(http.StatusBadRequest, "invalid user ID")
-    }
+	targetUserIDStr := c.Param("userID")
+	targetUserID, err := strconv.ParseInt(targetUserIDStr, 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid user ID")
+	}
 
-    ctx := c.Request().Context()
-    if err := db.SetUserAdmin(ctx, targetUserID, false); err != nil {
-        return echo.NewHTTPError(http.StatusInternalServerError, "failed to demote user")
-    }
+	ctx := c.Request().Context()
+	if err := db.SetUserAdmin(ctx, targetUserID, false); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to demote user")
+	}
 
-    return c.JSON(http.StatusOK, map[string]interface{}{
-        "message":    "User demoted to admin",
-        "user_id":    targetUserID,
-        "is_admin":   false,
-    })
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":  "User demoted to admin",
+		"user_id":  targetUserID,
+		"is_admin": false,
+	})
 }
 
 func (s *Server) ListUsersHandler(c echo.Context) error {
-    limit := int32(50)
-    offset := int32(0)
-    if v := c.QueryParam("limit"); v != "" {
-        if parsed, err := strconv.Atoi(v); err == nil {
-            limit = int32(parsed)
-        }
-    }
-    users, err := db.ListUsers(c.Request().Context(), limit, offset)
-    if err != nil {
-        return echo.NewHTTPError(http.StatusInternalServerError, "failed to list users")
-    }
-    return c.JSON(http.StatusOK, users)
+	limit := int32(50)
+	offset := int32(0)
+	if v := c.QueryParam("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			limit = int32(parsed)
+		}
+	}
+	users, err := db.ListUsers(c.Request().Context(), limit, offset)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list users")
+	}
+	return c.JSON(http.StatusOK, users)
 }
-
 
 func (s *Server) CreateServer() {
 	fmt.Println("BOOTING SERVER...")
@@ -675,7 +685,7 @@ func (s *Server) CreateServer() {
 	// admin routes go here
 	admin.POST("/users/promote/:userID", s.PromoteUserToAdminHandler)
 	admin.POST("/users/demote/:userID", s.DemoteUserToAdminHandler)
-	admin.GET("/users", s.ListUsersHandler)  // For selecting who to promote
+	admin.GET("/users", s.ListUsersHandler) // For selecting who to promote
 
 	ws := e.Group("/ws")
 	ws.Use(jwtMiddleware())
