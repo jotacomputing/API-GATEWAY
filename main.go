@@ -17,6 +17,7 @@ import (
 )
 
 
+
 func main() {
 	balance_Response_queue , berr := shm.OpenBalanceResponseQueue("/tmp/BalanceResponse")
 	if berr!=nil{
@@ -42,6 +43,15 @@ func main() {
 	if querr!=nil{
 		panic(fmt.Errorf("OpenQueryQueue error: %w", berr))
 	}
+	incoming_mm_queue , mmerr := shm.OpenMMQueue("/tmp/MarketMakerOrders")
+	if mmerr!=nil{
+		panic(fmt.Errorf("OpenMMQueue error: %w", berr))
+
+	}
+	mm_response_queue , mmreserr := shm.OpenMMResponseQueue("/tmp/MessageFromApiToMM")
+	if mmreserr!=nil{
+		panic(fmt.Errorf("OpenMMResponseQueue error: %w", mmreserr))
+	}
 
 	sm := symbolmanager.CreateSymbolManagerSingleton()
 	pubsubm := pubsubmanager.CreateSingletonInstance(sm)
@@ -56,6 +66,8 @@ func main() {
 		Order_Events_queue: order_events_queue,
 		Post_Order_queue: post_order_queue,
 		Query_queue: queries_queue,
+		Incoming_MM_queue: incoming_mm_queue,
+		MM_Response_queue: mm_response_queue,
 	}
 
 	order_event_hub := hub.NewOrderEventHub()

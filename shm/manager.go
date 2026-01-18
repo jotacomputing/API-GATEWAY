@@ -15,6 +15,8 @@ type ShmManager struct {
 	Order_Events_queue     *OrderEventQueue
 	Post_Order_queue       *Queue
 	Query_queue            *QueryQueue
+	Incoming_MM_queue     *MMQueue
+	MM_Response_queue     *MMResponseQueue
 	BrodCaster             BrodCaster
 }
 
@@ -24,6 +26,8 @@ func GetShmManager(Balance_Response_queue *BalanceResponseQueue,
 	Order_Evenets_queue *OrderEventQueue,
 	Post_Order_queue *Queue,
 	Query_queue *QueryQueue,
+	Incoming_MM_queue *MMQueue,
+	MM_Response_queue *MMResponseQueue,
 ) *ShmManager {
 	return &ShmManager{
 		Balance_Response_queue: Balance_Response_queue,
@@ -32,6 +36,8 @@ func GetShmManager(Balance_Response_queue *BalanceResponseQueue,
 		Order_Events_queue:     Order_Evenets_queue,
 		Post_Order_queue:       Post_Order_queue,
 		Query_queue:            Query_queue,
+		Incoming_MM_queue:     Incoming_MM_queue,
+		MM_Response_queue:     MM_Response_queue,
 	}
 }
 

@@ -65,6 +65,9 @@ type Server struct {
 	cacheGetHoldingsCh   chan balances.GetHoldingsReq
 	orderBuffer          chan shm.Order
 	cancelBuffer		 chan shm.OrderToBeCanceled
+	mmOrderBuffer        chan shm.Order
+	mmCancelBuffer       chan shm.OrderToBeCanceled
+	mmResponseBuffer     chan shm.Message
 }
 
 func NewServer(
@@ -83,29 +86,114 @@ func NewServer(
 		//we need to decide its capacity later
 		orderBuffer: make(chan shm.Order, 32768),
 		cancelBuffer: make(chan shm.OrderToBeCanceled, 32768),
+		mmOrderBuffer: make(chan shm.Order, 32768),
+		mmCancelBuffer: make(chan shm.OrderToBeCanceled, 32768),
+		mmResponseBuffer: make(chan shm.Message, 32768),
 	}
 }
 
+//poller that will deque from the shm queue and push into the order buffer
+
+func (s *Server) PollMMOrders() {
+	for {
+		order, err := s.shm_manager_ptr.Incoming_MM_queue.Dequeue()
+		if err != nil {
+			fmt.Println("error dequeuing mm order:", err)
+		}
+		if order == nil {
+			continue
+		}
+
+		order.Validate()
+		
+		if(order.OrderID == 0 && order.Order_type == 0){
+			//post order
+			//generate order id
+			var or shm.Order
+			
+			or.OrderID = utils.NextOrderID()
+			or.UserId = 0
+			or.Price = order.Price
+			or.Timestamp = order.Timestamp
+			or.Quantity = order.Quantity
+			or.Symbol = order.Symbol
+			or.Side = order.Side
+			or.Order_type = order.Order_type
+			or.Status = 0 // pending
+
+			s.mmOrderBuffer <- or
+
+			var message shm.Message
+			message.OrderId = or.OrderID
+			message.ClientId = order.ClientID
+			message.Timestamp = order.Timestamp
+			message.Symbol = order.Symbol
+			message.MessageType = 1 // order placed ack
+			s.mmResponseBuffer <- message
+
+		}else if(order.Order_type == 1){	
+			//cancel order
+			var or shm.OrderToBeCanceled
+			or.OrderId = order.OrderID
+			or.Symbol = order.Symbol
+			or.UserId = 0
+			s.mmCancelBuffer <- or
+
+			var message shm.Message
+			message.OrderId = order.OrderID
+			message.ClientId = order.ClientID
+			message.Timestamp = order.Timestamp
+			message.Symbol = order.Symbol
+			message.MessageType = 2 // order cancel ack
+			s.mmResponseBuffer <- message
+		}
+	}
+}
+
+func(s *Server) MMResponsePoller(){
+	for {
+	 	message := <-s.mmResponseBuffer
+			//enqueue into shm
+			if err := s.shm_manager_ptr.MM_Response_queue.Enqueue(message); err != nil {
+				log.Println("Failed to enqueue mm response message from buffer:", err)
+		}
+	}
+}
 // poller go routine to read from order buffer and enqueue into shm
 func (s *Server) OrderBufferPoller() {
 	for {
-		order := <-s.orderBuffer
-		//enqueue into shm
-		if err := s.shm_manager_ptr.Post_Order_queue.Enqueue(order); err != nil {
-			log.Println("Failed to enqueue order from buffer:", err)
-
+		select {
+		case order := <-s.mmOrderBuffer:
+			//enqueue into shm
+			if err := s.shm_manager_ptr.Post_Order_queue.Enqueue(order); err != nil {
+				log.Println("Failed to enqueue order from buffer:", err)
+			}
+		case order := <-s.orderBuffer:
+			//enqueue into shm
+			if err := s.shm_manager_ptr.Post_Order_queue.Enqueue(order); err != nil {
+				log.Println("Failed to enqueue order from buffer:", err)
+			}
 		}
 	}
 }
 
 func (s *Server) CancelBufferPoller() {
 	for {
-		order := <-s.cancelBuffer
-		//enqueue into shm
-		if err := s.shm_manager_ptr.CancelOrderQueue.Enqueue(order); err != nil {
-			log.Println("Failed to enqueue cancel order from buffer:", err)
-		}
+		select {
+		case order := <-s.mmCancelBuffer:
+			//enqueue into shm
+			if err := s.shm_manager_ptr.CancelOrderQueue.Enqueue(order); err != nil {
+				log.Println("Failed to enqueue cancel order from buffer:", err)
+			}
+
+
+		case order := <-s.cancelBuffer:
+			//enqueue into shm
+			if err := s.shm_manager_ptr.CancelOrderQueue.Enqueue(order); err != nil {
+				log.Println("Failed to enqueue cancel order from buffer:", err)
+			}
 	}
+}
 }
 
 func (s *Server) GetRecentTradesHandler(c echo.Context) error {
@@ -224,10 +312,6 @@ func (s *Server) CancelOrderHandler(c echo.Context) error {
 	default:
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "Cancel order buffer full, try again later")
 	}
-	
-	/* if err := s.shm_manager_ptr.CancelOrderQueue.Enqueue(cancelOrder); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "Failed to enqueue cancel order request")
-	} */
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"status":   "Cancel order request placed successfully",
@@ -640,6 +724,10 @@ func (s *Server) CreateServer() {
 	}
 	// start balance polling go routines
 	go s.OrderBufferPoller()
+	go s.CancelBufferPoller()
+	go s.MMResponsePoller()
+	go s.PollMMOrders()
+
 	ctx := context.Background()
 
 	go s.cache.Updater()
@@ -685,7 +773,7 @@ func (s *Server) CreateServer() {
 	// admin routes go here
 	admin.POST("/users/promote/:userID", s.PromoteUserToAdminHandler)
 	admin.POST("/users/demote/:userID", s.DemoteUserToAdminHandler)
-	admin.GET("/users", s.ListUsersHandler) // For selecting who to promote
+	admin.GET("/users", s.ListUsersHandler) // list users
 
 	ws := e.Group("/ws")
 	ws.Use(jwtMiddleware())
